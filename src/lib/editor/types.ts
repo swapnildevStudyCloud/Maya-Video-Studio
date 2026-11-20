@@ -287,6 +287,8 @@ export interface RenderProgress {
   progress: number;
   /** Processed time in seconds when reported by ffmpeg */
   timeSeconds?: number;
+  /** Human-readable status text (e.g., core download byte progress) */
+  statusText?: string;
 }
 
 export interface RenderResult {

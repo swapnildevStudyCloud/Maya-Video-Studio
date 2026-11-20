@@ -209,6 +209,22 @@ export {
 } from './ffmpegArgs';
 
 export {
+  createCoreLoadSessionState,
+  FFMPEG_CDN_BASE_URL,
+  FFMPEG_CORE_VERSION,
+  FFMPEG_LOAD_TIMEOUT_MS,
+  FFMPEG_LOCAL_BASE_URL,
+  FfmpegCoreLoadError,
+  formatDownloadingCoreText,
+  loadFfmpegCoreWithFallback,
+  MIN_FFMPEG_WASM_BYTES,
+  resetCoreLoadSession,
+  type CoreLoadSessionState,
+  type FfmpegCoreLoaderDeps,
+  type FfmpegInstanceLike,
+} from './ffmpegCoreLoader';
+
+export {
   extractAudioFromTrimmedRange,
   renderProjectExport,
   renderTrimmedVideo,

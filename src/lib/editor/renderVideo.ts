@@ -1,6 +1,11 @@
 import { FFmpeg } from '@ffmpeg/ffmpeg';
-import { toBlobURL } from '@ffmpeg/util';
 import { buildExtractAudioArgs, buildToolsExportPlan } from './ffmpegArgs';
+import {
+  createCoreLoadSessionState,
+  FfmpegCoreLoadError,
+  loadFfmpegCoreWithFallback,
+  resetCoreLoadSession,
+} from './ffmpegCoreLoader';
 import { sanitizeExportFilename } from './fileValidation';
 import { validateFontBytes } from './toolsValidation';
 import {
@@ -20,63 +25,14 @@ import {
   type VideoSegment,
 } from './types';
 
-let ffmpegInstance: FFmpeg | null = null;
-let loadPromise: Promise<FFmpeg> | null = null;
-let loadedCoreURL: string | null = null;
-let loadedWasmURL: string | null = null;
+const coreSession = createCoreLoadSessionState();
 let cachedFontBytes: Uint8Array | null = null;
-
-function revokeCoreBlobUrls(): void {
-  if (loadedCoreURL) {
-    URL.revokeObjectURL(loadedCoreURL);
-    loadedCoreURL = null;
-  }
-  if (loadedWasmURL) {
-    URL.revokeObjectURL(loadedWasmURL);
-    loadedWasmURL = null;
-  }
-}
 
 async function getLoadedFfmpeg(
   onProgress?: (progress: RenderProgress) => void,
   signal?: AbortSignal
 ): Promise<FFmpeg> {
-  if (signal?.aborted) {
-    throw new DOMException('Operation cancelled.', 'AbortError');
-  }
-
-  if (ffmpegInstance && ffmpegInstance.loaded) {
-    return ffmpegInstance;
-  }
-
-  if (!loadPromise) {
-    loadPromise = (async () => {
-      onProgress?.({ phase: 'loading', progress: 0 });
-      const instance = new FFmpeg();
-
-      const coreURL = await toBlobURL('/ffmpeg/ffmpeg-core.js', 'text/javascript');
-      const wasmURL = await toBlobURL('/ffmpeg/ffmpeg-core.wasm', 'application/wasm');
-      loadedCoreURL = coreURL;
-      loadedWasmURL = wasmURL;
-
-      if (signal?.aborted) {
-        instance.terminate();
-        revokeCoreBlobUrls();
-        throw new DOMException('Operation cancelled.', 'AbortError');
-      }
-
-      await instance.load({ coreURL, wasmURL }, { signal });
-      ffmpegInstance = instance;
-      return instance;
-    })().catch((err) => {
-      loadPromise = null;
-      ffmpegInstance = null;
-      revokeCoreBlobUrls();
-      throw err;
-    });
-  }
-
-  return loadPromise;
+  return loadFfmpegCoreWithFallback(coreSession, { onProgress, signal });
 }
 
 async function getBundledFontBytes(signal?: AbortSignal): Promise<Uint8Array> {
@@ -119,16 +75,7 @@ async function detectHasAudioStream(
 }
 
 function resetFfmpegWorker(): void {
-  if (ffmpegInstance) {
-    try {
-      ffmpegInstance.terminate();
-    } catch {
-      // Ignore worker termination errors
-    }
-  }
-  ffmpegInstance = null;
-  loadPromise = null;
-  revokeCoreBlobUrls();
+  resetCoreLoadSession(coreSession);
 }
 
 function toFriendlyRenderError(
@@ -137,6 +84,10 @@ function toFriendlyRenderError(
   burningCaptions: boolean
 ): Error {
   if (err instanceof DOMException && err.name === 'AbortError') {
+    return err;
+  }
+
+  if (err instanceof FfmpegCoreLoadError) {
     return err;
   }
 

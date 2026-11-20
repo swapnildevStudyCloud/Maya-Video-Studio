@@ -595,12 +595,24 @@ export function LeftMediaPanel({
             {captionError && (
               <div
                 role="alert"
-                className="flex min-w-0 items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-200"
+                className="flex min-w-0 flex-col gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-2.5 text-xs text-red-200"
               >
-                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" aria-hidden="true" />
-                <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-relaxed">
-                  {redactApiKey(captionError)}
-                </span>
+                <div className="flex min-w-0 items-start gap-2">
+                  <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-relaxed">
+                    {redactApiKey(captionError)}
+                  </span>
+                </div>
+                {hasVideo && hasApiKey && (
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={onGenerateCaptions}
+                    className="self-start rounded-md border border-red-400/40 bg-red-500/20 px-2.5 py-1 text-[11px] font-semibold text-red-100 transition-colors hover:bg-red-500/30 disabled:opacity-50"
+                  >
+                    Retry
+                  </button>
+                )}
               </div>
             )}
 

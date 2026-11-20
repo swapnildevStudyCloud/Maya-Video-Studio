@@ -692,7 +692,7 @@ export default function App() {
     captionAbortRef.current = controller;
     setIsGeneratingCaptions(true);
     setCaptionError(null);
-    setCaptionStatus('Extracting audio (mono 32 kbps)...');
+    setCaptionStatus('Loading ffmpeg core...');
 
     try {
       const extracted = await extractAudioFromTrimmedRange({
@@ -702,9 +702,12 @@ export default function App() {
         duration: targetAsset.duration,
         signal: controller.signal,
         onProgress: (p) => {
-          if (p.phase === 'loading') setCaptionStatus('Loading ffmpeg core...');
-          else if (p.phase === 'preparing') setCaptionStatus('Reading video audio track...');
-          else if (p.phase === 'processing') {
+          if (captionAbortRef.current !== controller || controller.signal.aborted) return;
+          if (p.phase === 'loading') {
+            setCaptionStatus(p.statusText ?? 'Loading ffmpeg core...');
+          } else if (p.phase === 'preparing') {
+            setCaptionStatus('Reading video audio track...');
+          } else if (p.phase === 'processing') {
             setCaptionStatus(`Extracting audio (${Math.round(p.progress * 100)}%)...`);
           }
         },
@@ -720,6 +723,8 @@ export default function App() {
         signal: controller.signal,
       });
 
+      if (captionAbortRef.current !== controller || controller.signal.aborted) return;
+
       dispatch({
         type: 'SET_CAPTION_CLIPS',
         captions: generated,
@@ -730,19 +735,28 @@ export default function App() {
         setCaptionError('No spoken words were detected in this audio range.');
       }
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      if (
+        captionAbortRef.current === controller &&
+        !(err instanceof DOMException && err.name === 'AbortError')
+      ) {
         const rawMsg = err instanceof Error ? err.message : 'Failed to generate captions.';
         setCaptionError(redactApiKey(rawMsg, apiKey));
       }
     } finally {
-      captionAbortRef.current = null;
-      setIsGeneratingCaptions(false);
-      setCaptionStatus(null);
+      if (captionAbortRef.current === controller) {
+        captionAbortRef.current = null;
+        setIsGeneratingCaptions(false);
+        setCaptionStatus(null);
+      }
     }
   }, [assetsMap, captionLanguage, firstVideoAsset, isBusy, videoClips]);
 
   const handleCancelCaptions = useCallback(() => {
-    captionAbortRef.current?.abort();
+    const controller = captionAbortRef.current;
+    captionAbortRef.current = null;
+    controller?.abort();
+    setIsGeneratingCaptions(false);
+    setCaptionStatus(null);
   }, []);
 
   const handleDownloadSrt = useCallback(() => {
@@ -769,7 +783,7 @@ export default function App() {
     setIsPlaying(false);
     setExportError(null);
     clearExportResult();
-    setRenderProgress({ phase: 'loading', progress: 0 });
+    setRenderProgress({ phase: 'loading', progress: 0, statusText: 'Loading ffmpeg core...' });
 
     try {
       const result = await renderProjectExport({
@@ -779,24 +793,37 @@ export default function App() {
         videoWidth: firstVideoAsset?.width,
         videoHeight: firstVideoAsset?.height,
         signal: controller.signal,
-        onProgress: (p) => setRenderProgress(p),
+        onProgress: (p) => {
+          if (exportAbortRef.current !== controller || controller.signal.aborted) return;
+          setRenderProgress(p);
+        },
       });
+      if (exportAbortRef.current !== controller || controller.signal.aborted) return;
       const resultUrl = URL.createObjectURL(result.blob);
       setExportResult(result);
       setExportResultUrl(resultUrl);
     } catch (err) {
-      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+      if (
+        exportAbortRef.current === controller &&
+        !(err instanceof DOMException && err.name === 'AbortError')
+      ) {
         setExportError(err instanceof Error ? err.message : 'Export failed.');
       }
     } finally {
-      exportAbortRef.current = null;
-      setIsExporting(false);
-      setRenderProgress(null);
+      if (exportAbortRef.current === controller) {
+        exportAbortRef.current = null;
+        setIsExporting(false);
+        setRenderProgress(null);
+      }
     }
   }, [assetsMap, clearExportResult, firstVideoAsset, isBusy, project, projectValidation.ok]);
 
   const handleCancelExport = useCallback(() => {
-    exportAbortRef.current?.abort();
+    const controller = exportAbortRef.current;
+    exportAbortRef.current = null;
+    controller?.abort();
+    setIsExporting(false);
+    setRenderProgress(null);
   }, []);
 
   // Global NLE keyboard shortcuts

@@ -58,6 +58,7 @@ const CANVAS_FIT_LABELS: Record<CanvasFitMode, string> = {
 
 function getPhaseLabel(progress: RenderProgress | null): string {
   if (!progress) return 'Starting export...';
+  if (progress.statusText) return progress.statusText;
   switch (progress.phase) {
     case 'loading':
       return 'Loading ffmpeg core...';
@@ -327,10 +328,23 @@ export function ExportDialog({
           {exportError && (
             <div
               role="alert"
-              className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
+              className="flex flex-col gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200"
             >
-              <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" aria-hidden="true" />
-              <span>{exportError}</span>
+              <div className="flex min-w-0 items-start gap-2">
+                <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-400" aria-hidden="true" />
+                <span className="min-w-0 flex-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-relaxed">
+                  {exportError}
+                </span>
+              </div>
+              {canStart && (
+                <button
+                  type="button"
+                  onClick={onExport}
+                  className="self-start rounded-md border border-red-400/40 bg-red-500/20 px-3 py-1 text-[11px] font-semibold text-red-100 transition-colors hover:bg-red-500/30"
+                >
+                  Retry
+                </button>
+              )}
             </div>
           )}
 
