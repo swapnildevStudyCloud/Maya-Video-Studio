@@ -4,8 +4,15 @@ import {
   sanitizeExportFilename,
   validateDuration,
   validateFilePreMetadata,
+  validateTotalVideoSize,
+  validateVideoClipLimit,
 } from '../fileValidation';
-import { MAX_DURATION_SECONDS, MAX_FILE_SIZE_BYTES } from '../types';
+import {
+  MAX_DURATION_SECONDS,
+  MAX_FILE_SIZE_BYTES,
+  MAX_TOTAL_VIDEO_SIZE_BYTES,
+  MAX_VIDEO_TRACK_CLIPS,
+} from '../types';
 
 function makeFtypHeader(brand = 'isom'): Uint8Array {
   const bytes = new Uint8Array(24);
@@ -151,6 +158,33 @@ describe('validateDuration', () => {
       const res = validateDuration(bad);
       expect(res.ok).toBe(false);
       if (!res.ok) expect(res.code).toBe('METADATA_UNREADABLE');
+    }
+  });
+});
+
+describe('multi-clip limits validation', () => {
+  it('enforces the 400 MB total imported video limit', () => {
+    const ok = validateTotalVideoSize(250 * 1024 * 1024, 150 * 1024 * 1024);
+    expect(ok).toEqual({ ok: true, value: MAX_TOTAL_VIDEO_SIZE_BYTES });
+
+    const over = validateTotalVideoSize(250 * 1024 * 1024, 150 * 1024 * 1024 + 1);
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.code).toBe('FILE_TOO_LARGE');
+      expect(over.error).toContain('400 MB');
+    }
+  });
+
+  it('enforces the 20 clips maximum on the Video track', () => {
+    expect(validateVideoClipLimit(MAX_VIDEO_TRACK_CLIPS - 1, 1)).toEqual({
+      ok: true,
+      value: MAX_VIDEO_TRACK_CLIPS,
+    });
+    const over = validateVideoClipLimit(MAX_VIDEO_TRACK_CLIPS, 1);
+    expect(over.ok).toBe(false);
+    if (!over.ok) {
+      expect(over.code).toBe('INVALID_PROJECT');
+      expect(over.error).toContain('20');
     }
   });
 });

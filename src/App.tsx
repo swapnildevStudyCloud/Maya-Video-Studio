@@ -1,62 +1,145 @@
-import { Pause, Play, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
-import { ExportPanel } from './components/ExportPanel';
-import { TrimTimeline } from './components/TrimTimeline';
-import { VideoDropzone } from './components/VideoDropzone';
+import { Monitor } from 'lucide-react';
 import {
-  formatTimecode,
-  renderTrimmedVideo,
-  validateTrimRange,
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
+import { ExportDialog } from './components/ExportDialog';
+import { InspectorPanel } from './components/InspectorPanel';
+import {
+  LeftMediaPanel,
+  type LeftPanelTab,
+  type TextPresetOption,
+} from './components/LeftMediaPanel';
+import { PreviewCanvas } from './components/PreviewCanvas';
+import { SettingsDialog } from './components/SettingsDialog';
+import { Timeline } from './components/Timeline';
+import { TopBar } from './components/TopBar';
+import {
+  canRedo,
+  canUndo,
+  captionsToSrt,
+  captureVideoThumbnail,
+  createInitialEditorState,
+  createVideoClipFromMeta,
+  DEFAULT_IMAGE_CLIP_DURATION,
+  DEFAULT_TEXT_CLIP_DURATION,
+  extractAudioFromTrimmedRange,
+  findClipInProject,
+  generateCaptionsWithGemini,
+  getProjectDuration,
+  getStoredGeminiApiKey,
+  getVideoTrackInsertIndexAtTime,
+  isSingleSimpleVideoClipProject,
+  nextProjectId,
+  probeAudioAssetMeta,
+  probeImageDimensions,
+  projectReducer,
+  projectToCaptions,
+  redactApiKey,
+  removeStoredGeminiApiKey,
+  renderProjectExport,
+  setStoredGeminiApiKey,
+  validateAudioFile,
+  validateImageFile,
+  validateProjectForExport,
+  validateTotalVideoSize,
+  validateVideoClipLimit,
   validateVideoFile,
+  type AudioClip,
+  type CaptionLanguageCode,
+  type ClipPropsPatch,
   type ExportMode,
+  type ExportSettings,
+  type ImageClip,
+  type MediaAsset,
   type RenderProgress,
   type RenderResult,
-  type VideoFileMetadata,
+  type TextClip,
+  type VideoClip,
 } from './lib/editor';
 
-function parseTrimNumber(raw: string): number {
-  const trimmed = raw.trim();
-  if (trimmed === '') return Number.NaN;
-  return Number(trimmed);
+function classifyDroppedFile(file: File): 'video' | 'audio' | 'image' {
+  const lower = file.name.toLowerCase();
+  if (
+    lower.endsWith('.mp3') ||
+    lower.endsWith('.wav') ||
+    lower.endsWith('.m4a') ||
+    file.type.startsWith('audio/')
+  ) {
+    return 'audio';
+  }
+  if (
+    lower.endsWith('.png') ||
+    lower.endsWith('.jpg') ||
+    lower.endsWith('.jpeg') ||
+    file.type.startsWith('image/')
+  ) {
+    return 'image';
+  }
+  return 'video';
 }
 
 export default function App() {
-  const headerFileInputRef = useRef<HTMLInputElement | null>(null);
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const [editorState, dispatch] = useReducer(
+    projectReducer,
+    undefined,
+    () => createInitialEditorState()
+  );
 
-  const [sourceFile, setSourceFile] = useState<File | null>(null);
-  const [sourceUrl, setSourceUrl] = useState<string | null>(null);
-  const [videoMeta, setVideoMeta] = useState<VideoFileMetadata | null>(null);
-  const [isLoadingFile, setIsLoadingFile] = useState(false);
-  const [fileError, setFileError] = useState<string | null>(null);
+  const project = editorState.history.present;
+  const { selectedClipId, playhead, zoomPxPerSec, snapEnabled } = editorState;
 
-  const [currentTime, setCurrentTime] = useState(0);
+  const [assetsMap, setAssetsMap] = useState<Map<string, MediaAsset>>(() => new Map());
+  const assetsRef = useRef<Map<string, MediaAsset>>(assetsMap);
+  assetsRef.current = assetsMap;
+
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
+  const playheadRef = useRef(playhead);
+  playheadRef.current = playhead;
+
+  const [leftTab, setLeftTab] = useState<LeftPanelTab>('media');
+  const [isLoadingMedia, setIsLoadingMedia] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isPreviewMuted, setIsPreviewMuted] = useState(false);
 
-  const [trimStart, setTrimStart] = useState(0);
-  const [trimEnd, setTrimEnd] = useState(0);
-  const [startInput, setStartInput] = useState('0.00');
-  const [endInput, setEndInput] = useState('0.00');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [storedApiKey, setStoredApiKey] = useState<string | null>(() =>
+    getStoredGeminiApiKey()
+  );
 
-  const [exportMode, setExportMode] = useState<ExportMode>('fast');
+  const [captionLanguage, setCaptionLanguage] = useState<CaptionLanguageCode>('auto');
+  const [isGeneratingCaptions, setIsGeneratingCaptions] = useState(false);
+  const [captionStatus, setCaptionStatus] = useState<string | null>(null);
+  const [captionError, setCaptionError] = useState<string | null>(null);
+  const captionAbortRef = useRef<AbortController | null>(null);
+
+  const [isExportOpen, setIsExportOpen] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [renderProgress, setRenderProgress] = useState<RenderProgress | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<RenderResult | null>(null);
   const [exportResultUrl, setExportResultUrl] = useState<string | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
 
-  // Revoke source object URL on change or unmount
+  const isBusy = isExporting || isGeneratingCaptions;
+
+  // Revoke all created object URLs on unmount
   useEffect(() => {
     return () => {
-      if (sourceUrl) {
-        URL.revokeObjectURL(sourceUrl);
+      for (const asset of assetsRef.current.values()) {
+        URL.revokeObjectURL(asset.objectUrl);
       }
     };
-  }, [sourceUrl]);
+  }, []);
 
-  // Revoke export result object URL on change or unmount
   useEffect(() => {
     return () => {
       if (exportResultUrl) {
@@ -65,363 +148,913 @@ export default function App() {
     };
   }, [exportResultUrl]);
 
+  const assetList = useMemo(() => Array.from(assetsMap.values()), [assetsMap]);
+
+  const totalVideoBytes = useMemo(() => {
+    let sum = 0;
+    for (const asset of assetsMap.values()) {
+      if (asset.kind === 'video') sum += asset.size;
+    }
+    return sum;
+  }, [assetsMap]);
+
+  const videoTrack = useMemo(
+    () => project.tracks.find((t) => t.kind === 'video') ?? null,
+    [project.tracks]
+  );
+
+  const videoClips = useMemo<VideoClip[]>(
+    () => (videoTrack ? videoTrack.clips.filter((c): c is VideoClip => c.type === 'video') : []),
+    [videoTrack]
+  );
+
+  const firstVideoAsset = useMemo(() => {
+    const firstClip = videoClips[0];
+    if (firstClip) {
+      const fromClip = assetsMap.get(firstClip.assetId);
+      if (fromClip && fromClip.kind === 'video') return fromClip;
+    }
+    for (const asset of assetsMap.values()) {
+      if (asset.kind === 'video') return asset;
+    }
+    return null;
+  }, [assetsMap, videoClips]);
+
+  const selectedEntry = useMemo(
+    () => findClipInProject(project, selectedClipId),
+    [project, selectedClipId]
+  );
+  const selectedClip = selectedEntry?.clip ?? null;
+
+  const projectDuration = useMemo(() => getProjectDuration(project), [project]);
+  const projectValidation = useMemo(
+    () => validateProjectForExport(project, assetsMap),
+    [project, assetsMap]
+  );
+  const requiresReencode = useMemo(
+    () => !isSingleSimpleVideoClipProject(project),
+    [project]
+  );
+  const captionSegments = useMemo(() => projectToCaptions(project), [project]);
+
+  const maxSourceDuration = useMemo(() => {
+    let maxDur = 0;
+    for (const asset of assetsMap.values()) {
+      if (asset.kind === 'video' && asset.duration > maxDur) {
+        maxDur = asset.duration;
+      }
+    }
+    return maxDur;
+  }, [assetsMap]);
+
   const clearExportResult = useCallback(() => {
     setExportResult(null);
     setExportResultUrl(null);
   }, []);
 
-  const handleSelectFile = useCallback(async (file: File) => {
-    setIsLoadingFile(true);
-    setFileError(null);
-    setExportError(null);
+  const handleImportVideos = useCallback(
+    async (files: File[]) => {
+      if (isBusy || isLoadingMedia || files.length === 0) return;
+      setIsLoadingMedia(true);
+      setMediaError(null);
+      setExportError(null);
+      setCaptionError(null);
+      clearExportResult();
 
-    const validation = await validateVideoFile(file);
-    if (!validation.ok) {
-      setIsLoadingFile(false);
-      setFileError(validation.error);
+      let runningVideoBytes = 0;
+      for (const a of assetsRef.current.values()) {
+        if (a.kind === 'video') runningVideoBytes += a.size;
+      }
+
+      const existingVideoTrackClips =
+        projectRef.current.tracks.find((t) => t.kind === 'video')?.clips.length ?? 0;
+      const shouldAutoAddToEmptyTimeline = existingVideoTrackClips === 0;
+      let addedToTimelineCount = 0;
+      const errors: string[] = [];
+
+      for (const file of files) {
+        const sizeBudgetCheck = validateTotalVideoSize(runningVideoBytes, file.size);
+        if (!sizeBudgetCheck.ok) {
+          errors.push(sizeBudgetCheck.error);
+          continue;
+        }
+
+        const validation = await validateVideoFile(file);
+        if (!validation.ok) {
+          errors.push(`${file.name}: ${validation.error}`);
+          continue;
+        }
+
+        const meta = validation.value;
+        const postBudget = validateTotalVideoSize(runningVideoBytes, meta.size);
+        if (!postBudget.ok) {
+          errors.push(postBudget.error);
+          continue;
+        }
+
+        const thumbnailUrl = await captureVideoThumbnail(file);
+        const assetId = nextProjectId('asset_vid');
+        const objectUrl = URL.createObjectURL(file);
+        const nextAsset: MediaAsset = {
+          id: assetId,
+          kind: 'video',
+          name: meta.name,
+          size: meta.size,
+          extension: meta.extension,
+          file,
+          objectUrl,
+          thumbnailUrl,
+          duration: meta.duration,
+          width: meta.width,
+          height: meta.height,
+        };
+
+        runningVideoBytes += meta.size;
+        setAssetsMap((prev) => {
+          const next = new Map(prev);
+          next.set(assetId, nextAsset);
+          return next;
+        });
+
+        // If the Video track started empty, place initial videos onto the timeline automatically
+        if (shouldAutoAddToEmptyTimeline) {
+          const limitCheck = validateVideoClipLimit(
+            existingVideoTrackClips + addedToTimelineCount,
+            1
+          );
+          if (!limitCheck.ok) {
+            errors.push(`${file.name} added to library (${limitCheck.error})`);
+          } else {
+            const clip = createVideoClipFromMeta(meta, assetId, 0);
+            dispatch({ type: 'ADD_CLIP', clip });
+            addedToTimelineCount += 1;
+          }
+        }
+      }
+
+      if (errors.length > 0) {
+        setMediaError(errors[0]);
+      }
+      setIsLoadingMedia(false);
+    },
+    [clearExportResult, isBusy, isLoadingMedia]
+  );
+
+  const handleImportAudios = useCallback(
+    async (files: File[]) => {
+      if (isBusy || isLoadingMedia || files.length === 0) return;
+      setIsLoadingMedia(true);
+      setMediaError(null);
+      const errors: string[] = [];
+
+      for (const file of files) {
+        const validation = await validateAudioFile(file);
+        if (!validation.ok) {
+          errors.push(`${file.name}: ${validation.error}`);
+          continue;
+        }
+
+        try {
+          const { duration, waveform } = await probeAudioAssetMeta(file);
+          const assetId = nextProjectId('asset_aud');
+          const objectUrl = URL.createObjectURL(file);
+          const asset: MediaAsset = {
+            id: assetId,
+            kind: 'audio',
+            name: file.name,
+            size: file.size,
+            file,
+            objectUrl,
+            format: validation.value,
+            duration,
+            waveform,
+          };
+          setAssetsMap((prev) => {
+            const next = new Map(prev);
+            next.set(assetId, asset);
+            return next;
+          });
+
+          const clip: AudioClip = {
+            id: nextProjectId('aud'),
+            type: 'audio',
+            assetId,
+            name: file.name,
+            format: validation.value,
+            start: playheadRef.current,
+            duration: Math.max(0.5, duration),
+            sourceOffset: 0,
+            sourceDuration: duration,
+            volumePercent: 100,
+            muted: false,
+            loop: false,
+            fadeInSeconds: 0,
+            fadeOutSeconds: 0,
+          };
+          dispatch({ type: 'ADD_CLIP', clip });
+        } catch (err) {
+          errors.push(
+            err instanceof Error ? err.message : `Could not decode audio file "${file.name}".`
+          );
+        }
+      }
+
+      if (errors.length > 0) {
+        setMediaError(errors[0]);
+      }
+      setIsLoadingMedia(false);
+    },
+    [isBusy, isLoadingMedia]
+  );
+
+  const handleImportImages = useCallback(
+    async (files: File[]) => {
+      if (isBusy || isLoadingMedia || files.length === 0) return;
+      setIsLoadingMedia(true);
+      setMediaError(null);
+      const errors: string[] = [];
+
+      for (const file of files) {
+        const validation = await validateImageFile(file);
+        if (!validation.ok) {
+          errors.push(`${file.name}: ${validation.error}`);
+          continue;
+        }
+
+        try {
+          const { width, height } = await probeImageDimensions(file);
+          const assetId = nextProjectId('asset_img');
+          const objectUrl = URL.createObjectURL(file);
+          const asset: MediaAsset = {
+            id: assetId,
+            kind: 'image',
+            name: file.name,
+            size: file.size,
+            file,
+            objectUrl,
+            format: validation.value,
+            width,
+            height,
+          };
+          setAssetsMap((prev) => {
+            const next = new Map(prev);
+            next.set(assetId, asset);
+            return next;
+          });
+
+          const clip: ImageClip = {
+            id: nextProjectId('img'),
+            type: 'image',
+            assetId,
+            name: file.name,
+            format: validation.value,
+            start: playheadRef.current,
+            duration: DEFAULT_IMAGE_CLIP_DURATION,
+            sourceOffset: 0,
+            xPercent: 85,
+            yPercent: 15,
+            sizePercent: 18,
+            opacityPercent: 100,
+          };
+          dispatch({ type: 'ADD_CLIP', clip });
+        } catch (err) {
+          errors.push(
+            err instanceof Error ? err.message : `Could not decode image file "${file.name}".`
+          );
+        }
+      }
+
+      if (errors.length > 0) {
+        setMediaError(errors[0]);
+      }
+      setIsLoadingMedia(false);
+    },
+    [isBusy, isLoadingMedia]
+  );
+
+  const handleImportFiles = useCallback(
+    async (files: File[]) => {
+      if (isBusy || isLoadingMedia || files.length === 0) return;
+      const videos: File[] = [];
+      const audios: File[] = [];
+      const images: File[] = [];
+      for (const f of files) {
+        const kind = classifyDroppedFile(f);
+        if (kind === 'audio') audios.push(f);
+        else if (kind === 'image') images.push(f);
+        else videos.push(f);
+      }
+      if (videos.length > 0) await handleImportVideos(videos);
+      if (audios.length > 0) await handleImportAudios(audios);
+      if (images.length > 0) await handleImportImages(images);
+    },
+    [handleImportAudios, handleImportImages, handleImportVideos, isBusy, isLoadingMedia]
+  );
+
+  const handleRemoveAsset = useCallback(
+    (assetId: string) => {
+      if (isBusy) return;
+      const target = assetsRef.current.get(assetId);
+      if (!target) return;
+
+      URL.revokeObjectURL(target.objectUrl);
+      setAssetsMap((prev) => {
+        const next = new Map(prev);
+        next.delete(assetId);
+        return next;
+      });
+      dispatch({ type: 'REMOVE_ASSET_CLIPS', assetId });
+    },
+    [isBusy]
+  );
+
+  const createClipForAsset = useCallback((asset: MediaAsset, start: number) => {
+    if (asset.kind === 'video') {
+      return createVideoClipFromMeta(
+        {
+          name: asset.name,
+          size: asset.size,
+          mimeType: asset.file.type || 'video/mp4',
+          extension: asset.extension,
+          duration: asset.duration,
+          width: asset.width,
+          height: asset.height,
+        },
+        asset.id,
+        start
+      );
+    }
+
+    if (asset.kind === 'audio') {
+      const clip: AudioClip = {
+        id: nextProjectId('aud'),
+        type: 'audio',
+        assetId: asset.id,
+        name: asset.name,
+        format: asset.format,
+        start,
+        duration: Math.max(0.5, asset.duration),
+        sourceOffset: 0,
+        sourceDuration: asset.duration,
+        volumePercent: 100,
+        muted: false,
+        loop: false,
+        fadeInSeconds: 0,
+        fadeOutSeconds: 0,
+      };
+      return clip;
+    }
+
+    const clip: ImageClip = {
+      id: nextProjectId('img'),
+      type: 'image',
+      assetId: asset.id,
+      name: asset.name,
+      format: asset.format,
+      start,
+      duration: DEFAULT_IMAGE_CLIP_DURATION,
+      sourceOffset: 0,
+      xPercent: 85,
+      yPercent: 15,
+      sizePercent: 18,
+      opacityPercent: 100,
+    };
+    return clip;
+  }, []);
+
+  const handleAddAssetToTimeline = useCallback(
+    (asset: MediaAsset) => {
+      if (isBusy) return;
+
+      if (asset.kind === 'video') {
+        const limitCheck = validateVideoClipLimit(videoClips.length, 1);
+        if (!limitCheck.ok) {
+          setMediaError(limitCheck.error);
+          return;
+        }
+        setMediaError(null);
+        const clip = createClipForAsset(asset, 0);
+        dispatch({ type: 'ADD_CLIP', clip });
+        return;
+      }
+
+      const clip = createClipForAsset(asset, playheadRef.current);
+      dispatch({ type: 'ADD_CLIP', clip });
+    },
+    [createClipForAsset, isBusy, videoClips.length]
+  );
+
+  const handleDropAssetOnTimeline = useCallback(
+    (assetId: string, dropTime: number, targetTrackId?: string) => {
+      if (isBusy) return;
+      const asset = assetsRef.current.get(assetId);
+      if (!asset) return;
+
+      if (asset.kind === 'video') {
+        const limitCheck = validateVideoClipLimit(videoClips.length, 1);
+        if (!limitCheck.ok) {
+          setMediaError(limitCheck.error);
+          return;
+        }
+        setMediaError(null);
+        const insertIndex = getVideoTrackInsertIndexAtTime(videoClips, dropTime);
+        const clip = createClipForAsset(asset, dropTime);
+        dispatch({ type: 'ADD_CLIP', clip, insertIndex });
+        return;
+      }
+
+      const clip = createClipForAsset(asset, dropTime);
+      dispatch({ type: 'ADD_CLIP', clip, trackId: targetTrackId });
+    },
+    [createClipForAsset, isBusy, videoClips]
+  );
+
+  const handleAddTextClip = useCallback(
+    (preset?: TextPresetOption) => {
+      if (isBusy) return;
+      const text = preset?.text ?? 'Sample text';
+      const clip: TextClip = {
+        id: nextProjectId('txt'),
+        type: 'text',
+        name: text.slice(0, 24),
+        start: playheadRef.current,
+        duration: DEFAULT_TEXT_CLIP_DURATION,
+        sourceOffset: 0,
+        text,
+        size: preset?.size ?? 'medium',
+        color: preset?.color ?? 'white',
+        backgroundBox: preset?.backgroundBox ?? false,
+        align: preset?.align ?? 'center',
+        xPercent: preset?.xPercent ?? 50,
+        yPercent: preset?.yPercent ?? 50,
+      };
+      dispatch({ type: 'ADD_CLIP', clip });
+    },
+    [isBusy]
+  );
+
+  const handleTogglePlay = useCallback(() => {
+    setIsPlaying((prev) => {
+      if (!prev && projectDuration > 0 && playheadRef.current >= projectDuration - 0.02) {
+        dispatch({ type: 'SET_PLAYHEAD', time: 0 });
+      }
+      return !prev;
+    });
+  }, [projectDuration]);
+
+  const handlePlayheadChange = useCallback((time: number) => {
+    dispatch({ type: 'SET_PLAYHEAD', time });
+  }, []);
+
+  const handleStepFrame = useCallback((deltaSeconds: number) => {
+    setIsPlaying(false);
+    dispatch({ type: 'STEP_PLAYHEAD', deltaSeconds });
+  }, []);
+
+  const handleSelectClip = useCallback((clipId: string | null) => {
+    dispatch({ type: 'SELECT_CLIP', clipId });
+  }, []);
+
+  const handleBeginDragTransaction = useCallback(() => {
+    dispatch({ type: 'BEGIN_EDIT_TRANSACTION' });
+  }, []);
+
+  const handleCommitDragTransaction = useCallback(() => {
+    dispatch({ type: 'COMMIT_EDIT_TRANSACTION' });
+  }, []);
+
+  const handleMoveClip = useCallback(
+    (clipId: string, start: number, targetTrackId?: string) => {
+      dispatch({ type: 'MOVE_CLIP', clipId, start, targetTrackId });
+    },
+    []
+  );
+
+  const handleResizeClip = useCallback(
+    (clipId: string, edge: 'left' | 'right', time: number) => {
+      dispatch({ type: 'RESIZE_CLIP', clipId, edge, time });
+    },
+    []
+  );
+
+  const handleUpdateClipProps = useCallback((clipId: string, patch: ClipPropsPatch) => {
+    dispatch({ type: 'UPDATE_CLIP_PROPS', clipId, patch });
+  }, []);
+
+  const handleDeleteClip = useCallback((clipId: string) => {
+    dispatch({ type: 'DELETE_CLIP', clipId });
+  }, []);
+
+  const handleSplitAtPlayhead = useCallback(() => {
+    dispatch({ type: 'SPLIT_CLIP_AT_PLAYHEAD' });
+  }, []);
+
+  const handleDuplicateSelected = useCallback(() => {
+    dispatch({ type: 'DUPLICATE_CLIP' });
+  }, []);
+
+  const handleDeleteSelected = useCallback(() => {
+    if (!selectedClipId) return;
+    dispatch({ type: 'DELETE_CLIP', clipId: selectedClipId });
+  }, [selectedClipId]);
+
+  const handleSaveApiKey = useCallback((key: string) => {
+    setStoredGeminiApiKey(key);
+    setStoredApiKey(getStoredGeminiApiKey());
+    setCaptionError(null);
+  }, []);
+
+  const handleRemoveApiKey = useCallback(() => {
+    removeStoredGeminiApiKey();
+    setStoredApiKey(null);
+  }, []);
+
+  const handleGenerateCaptions = useCallback(async () => {
+    const captionClip = videoClips[0];
+    const targetAsset = captionClip
+      ? assetsMap.get(captionClip.assetId) ?? firstVideoAsset
+      : firstVideoAsset;
+    if (!targetAsset || targetAsset.kind !== 'video' || isBusy) return;
+
+    const apiKey = getStoredGeminiApiKey();
+    if (!apiKey) {
+      setIsSettingsOpen(true);
       return;
     }
 
-    const nextUrl = URL.createObjectURL(file);
-    const meta = validation.value;
-
-    setSourceFile(file);
-    setSourceUrl(nextUrl);
-    setVideoMeta(meta);
-    setCurrentTime(0);
-    setIsPlaying(false);
-    setTrimStart(0);
-    setTrimEnd(meta.duration);
-    setStartInput('0.00');
-    setEndInput(meta.duration.toFixed(2));
-    setExportResult(null);
-    setExportResultUrl(null);
-    setRenderProgress(null);
-    setIsLoadingFile(false);
-  }, []);
-
-  const handleHeaderFileInput = (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      void handleSelectFile(file);
-    }
-    event.target.value = '';
-  };
-
-  const handleChangeVideo = () => {
-    if (isExporting) return;
-    setSourceFile(null);
-    setSourceUrl(null);
-    setVideoMeta(null);
-    setFileError(null);
-    setExportError(null);
-    clearExportResult();
-    setCurrentTime(0);
-    setIsPlaying(false);
-  };
-
-  const trimValidation = useMemo(() => {
-    if (!videoMeta) {
-      return { ok: false as const, error: 'No video loaded.' };
-    }
-    return validateTrimRange(trimStart, trimEnd, videoMeta.duration);
-  }, [trimEnd, trimStart, videoMeta]);
-
-  const handleSeek = useCallback((time: number) => {
-    const video = videoRef.current;
-    if (!video || !Number.isFinite(time)) return;
-    const clamped = Math.max(0, Math.min(video.duration || time, time));
-    video.currentTime = clamped;
-    setCurrentTime(clamped);
-  }, []);
-
-  const handleTogglePlay = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    if (video.paused || video.ended) {
-      void video.play().catch(() => {
-        setIsPlaying(false);
-      });
-    } else {
-      video.pause();
-    }
-  }, []);
-
-  const handleToggleMute = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    video.muted = !video.muted;
-    setIsMuted(video.muted);
-  }, []);
-
-  const handleStartInputChange = useCallback((raw: string) => {
-    setStartInput(raw);
-    setTrimStart(parseTrimNumber(raw));
-  }, []);
-
-  const handleEndInputChange = useCallback((raw: string) => {
-    setEndInput(raw);
-    setTrimEnd(parseTrimNumber(raw));
-  }, []);
-
-  const handleRangeSliderChange = useCallback(
-    (nextStart: number, nextEnd: number) => {
-      const maxDuration = videoMeta?.duration ?? nextEnd;
-      const clampedStart = Math.max(0, Math.min(maxDuration, nextStart));
-      const clampedEnd = Math.max(0, Math.min(maxDuration, nextEnd));
-      setTrimStart(clampedStart);
-      setTrimEnd(clampedEnd);
-      setStartInput(clampedStart.toFixed(2));
-      setEndInput(clampedEnd.toFixed(2));
-    },
-    [videoMeta]
-  );
-
-  const handleSetInAtCurrent = useCallback(() => {
-    const video = videoRef.current;
-    const raw = video ? video.currentTime : currentTime;
-    const maxDuration = videoMeta?.duration ?? raw;
-    const clamped = Math.max(0, Math.min(maxDuration, raw));
-    setTrimStart(clamped);
-    setStartInput(clamped.toFixed(2));
-  }, [currentTime, videoMeta]);
-
-  const handleSetOutAtCurrent = useCallback(() => {
-    const video = videoRef.current;
-    const raw = video ? video.currentTime : currentTime;
-    const maxDuration = videoMeta?.duration ?? raw;
-    const clamped = Math.max(0, Math.min(maxDuration, raw));
-    setTrimEnd(clamped);
-    setEndInput(clamped.toFixed(2));
-  }, [currentTime, videoMeta]);
-
-  const handleExport = useCallback(async () => {
-    if (!sourceFile || !videoMeta || !trimValidation.ok || isExporting) return;
+    const extractStart = captionClip ? captionClip.sourceOffset : 0;
+    const extractEnd = captionClip
+      ? Math.min(captionClip.sourceDuration, captionClip.sourceOffset + captionClip.duration * captionClip.speed)
+      : targetAsset.duration;
+    const timelineOffset = captionClip ? captionClip.start : 0;
 
     const controller = new AbortController();
-    abortControllerRef.current = controller;
-
-    setIsExporting(true);
-    setExportError(null);
-    setExportResult(null);
-    setExportResultUrl(null);
-    setRenderProgress({ phase: 'loading', progress: 0 });
+    captionAbortRef.current = controller;
+    setIsGeneratingCaptions(true);
+    setCaptionError(null);
+    setCaptionStatus('Extracting audio (mono 32 kbps)...');
 
     try {
-      const result = await renderTrimmedVideo({
-        file: sourceFile,
-        start: trimValidation.value.start,
-        end: trimValidation.value.end,
-        duration: videoMeta.duration,
-        mode: exportMode,
+      const extracted = await extractAudioFromTrimmedRange({
+        file: targetAsset.file,
+        start: extractStart,
+        end: Math.max(extractStart + 0.5, extractEnd),
+        duration: targetAsset.duration,
         signal: controller.signal,
-        onProgress: (nextProgress) => {
-          setRenderProgress(nextProgress);
+        onProgress: (p) => {
+          if (p.phase === 'loading') setCaptionStatus('Loading ffmpeg core...');
+          else if (p.phase === 'preparing') setCaptionStatus('Reading video audio track...');
+          else if (p.phase === 'processing') {
+            setCaptionStatus(`Extracting audio (${Math.round(p.progress * 100)}%)...`);
+          }
         },
       });
 
+      setCaptionStatus('Generating captions with Gemini...');
+      const generated = await generateCaptionsWithGemini({
+        apiKey,
+        audioBytes: extracted.bytes,
+        mimeType: extracted.mimeType,
+        clipDuration: extracted.duration,
+        language: captionLanguage,
+        signal: controller.signal,
+      });
+
+      dispatch({
+        type: 'SET_CAPTION_CLIPS',
+        captions: generated,
+        timelineOffset,
+      });
+
+      if (generated.length === 0) {
+        setCaptionError('No spoken words were detected in this audio range.');
+      }
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        const rawMsg = err instanceof Error ? err.message : 'Failed to generate captions.';
+        setCaptionError(redactApiKey(rawMsg, apiKey));
+      }
+    } finally {
+      captionAbortRef.current = null;
+      setIsGeneratingCaptions(false);
+      setCaptionStatus(null);
+    }
+  }, [assetsMap, captionLanguage, firstVideoAsset, isBusy, videoClips]);
+
+  const handleCancelCaptions = useCallback(() => {
+    captionAbortRef.current?.abort();
+  }, []);
+
+  const handleDownloadSrt = useCallback(() => {
+    if (captionSegments.length === 0) return;
+    const srt = captionsToSrt(captionSegments);
+    const blob = new Blob([srt], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const safeName = (project.name || 'captions').replace(/[^a-zA-Z0-9._-]+/g, '_');
+    a.download = `${safeName}.srt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }, [captionSegments, project.name]);
+
+  const handleExport = useCallback(async () => {
+    if (!projectValidation.ok || isBusy) return;
+
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
+    setIsExporting(true);
+    setIsPlaying(false);
+    setExportError(null);
+    clearExportResult();
+    setRenderProgress({ phase: 'loading', progress: 0 });
+
+    try {
+      const result = await renderProjectExport({
+        videoFile: firstVideoAsset?.file ?? null,
+        project,
+        assets: assetsMap,
+        videoWidth: firstVideoAsset?.width,
+        videoHeight: firstVideoAsset?.height,
+        signal: controller.signal,
+        onProgress: (p) => setRenderProgress(p),
+      });
       const resultUrl = URL.createObjectURL(result.blob);
       setExportResult(result);
       setExportResultUrl(resultUrl);
     } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        // User cancelled export intentionally
-      } else {
-        setExportError(
-          err instanceof Error
-            ? err.message
-            : 'Video export failed. Try Fast mode or a smaller file.'
-        );
+      if (!(err instanceof DOMException && err.name === 'AbortError')) {
+        setExportError(err instanceof Error ? err.message : 'Export failed.');
       }
     } finally {
-      abortControllerRef.current = null;
+      exportAbortRef.current = null;
       setIsExporting(false);
       setRenderProgress(null);
     }
-  }, [exportMode, isExporting, sourceFile, trimValidation, videoMeta]);
+  }, [assetsMap, clearExportResult, firstVideoAsset, isBusy, project, projectValidation.ok]);
 
   const handleCancelExport = useCallback(() => {
-    abortControllerRef.current?.abort();
+    exportAbortRef.current?.abort();
   }, []);
+
+  // Global NLE keyboard shortcuts
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isSettingsOpen || isExportOpen || isBusy) return;
+
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      const isTextInput =
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        Boolean(target?.isContentEditable) ||
+        (tag === 'INPUT' &&
+          !['range', 'checkbox', 'radio', 'button'].includes(
+            (target as HTMLInputElement).type
+          ));
+
+      if (isTextInput) return;
+
+      const mod = e.metaKey || e.ctrlKey;
+      const keyLower = e.key.toLowerCase();
+
+      if (mod && keyLower === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) dispatch({ type: 'REDO' });
+        else dispatch({ type: 'UNDO' });
+        return;
+      }
+
+      if (mod && keyLower === 'y') {
+        e.preventDefault();
+        dispatch({ type: 'REDO' });
+        return;
+      }
+
+      if (mod && keyLower === 'd') {
+        e.preventDefault();
+        if (selectedClipId) dispatch({ type: 'DUPLICATE_CLIP', clipId: selectedClipId });
+        return;
+      }
+
+      if (e.code === 'Space') {
+        if (projectDuration > 0 || firstVideoAsset) {
+          e.preventDefault();
+          handleTogglePlay();
+        }
+        return;
+      }
+
+      if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        setIsPlaying(false);
+        dispatch({ type: 'STEP_PLAYHEAD', deltaSeconds: e.shiftKey ? -1 : -1 / 30 });
+        return;
+      }
+
+      if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        setIsPlaying(false);
+        dispatch({ type: 'STEP_PLAYHEAD', deltaSeconds: e.shiftKey ? 1 : 1 / 30 });
+        return;
+      }
+
+      if (!mod && keyLower === 's') {
+        if (projectDuration > 0) {
+          e.preventDefault();
+          dispatch({ type: 'SPLIT_CLIP_AT_PLAYHEAD' });
+        }
+        return;
+      }
+
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        if (selectedClipId) {
+          e.preventDefault();
+          dispatch({ type: 'DELETE_CLIP', clipId: selectedClipId });
+        }
+        return;
+      }
+
+      if (e.key === '=' || e.key === '+') {
+        e.preventDefault();
+        dispatch({ type: 'SET_ZOOM', zoomPxPerSec: zoomPxPerSec + 15 });
+        return;
+      }
+
+      if (e.key === '-') {
+        e.preventDefault();
+        dispatch({ type: 'SET_ZOOM', zoomPxPerSec: zoomPxPerSec - 15 });
+      }
+    };
+
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [
+    firstVideoAsset,
+    handleTogglePlay,
+    isBusy,
+    isExportOpen,
+    isSettingsOpen,
+    projectDuration,
+    selectedClipId,
+    zoomPxPerSec,
+  ]);
+
+  const firstClipSizeLabel =
+    firstVideoAsset && firstVideoAsset.width > 0 && firstVideoAsset.height > 0
+      ? `${firstVideoAsset.width}×${firstVideoAsset.height}`
+      : null;
 
   return (
     <div className="min-h-screen bg-[#0B0D11] text-slate-100">
-      {/* Top Bar */}
-      <header className="border-b border-[#232A38] bg-[#0B0D11]">
-        <div className="mx-auto flex max-w-[1360px] items-center justify-between gap-8 px-4 py-3.5 sm:px-6">
-          <span className="text-base font-semibold tracking-tight text-slate-100 whitespace-nowrap shrink-0">
-            Maya Video Studio
-          </span>
-
-          <div className="flex items-center gap-3 shrink-0">
-            <input
-              ref={headerFileInputRef}
-              type="file"
-              accept=".mp4,.mov,video/mp4,video/quicktime"
-              onChange={handleHeaderFileInput}
-              className="sr-only"
-              aria-label="Open a different video file"
-            />
-            {videoMeta && (
-              <button
-                type="button"
-                disabled={isExporting || isLoadingFile}
-                onClick={() => headerFileInputRef.current?.click()}
-                className="min-h-[38px] rounded-lg border border-[#2C3547] bg-[#131720] px-4 py-1.5 text-xs font-semibold text-slate-100 transition-colors hover:border-slate-500 hover:bg-[#191F2C] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 disabled:cursor-not-allowed disabled:opacity-50 whitespace-nowrap shrink-0"
-              >
-                Open Video
-              </button>
-            )}
-          </div>
+      {/* Desktop-first viewport notice (< 1024px) */}
+      <div className="flex min-h-screen flex-col items-center justify-center p-6 text-center lg:hidden">
+        <div className="max-w-sm rounded-lg border border-[#232A38] bg-[#131720] p-6">
+          <Monitor className="mx-auto mb-3 h-7 w-7 text-blue-400" aria-hidden="true" />
+          <h1 className="text-base font-semibold text-slate-100">
+            Desktop screen required
+          </h1>
+          <p className="mt-2 text-xs leading-relaxed text-slate-400">
+            Maya Video Studio&apos;s timeline editor is designed for desktop viewports at least 1024px wide. Please widen your browser window or open on a desktop device.
+          </p>
         </div>
-      </header>
+      </div>
 
-      <main className="mx-auto max-w-[1360px] px-4 py-6 sm:px-6">
-        {/* Small / mobile screen browser memory notice */}
-        <div className="mb-5 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-2.5 text-xs leading-relaxed text-amber-200 md:hidden">
-          Large video files may fail on mobile browsers due to memory limits. Desktop Chrome, Edge, or Firefox is recommended.
-        </div>
+      {/* Full desktop timeline editor (>= 1024px) */}
+      <div className="hidden h-screen flex-col overflow-hidden lg:flex">
+        <TopBar
+          projectName={project.name}
+          onProjectNameChange={(name) => dispatch({ type: 'SET_PROJECT_NAME', name })}
+          canUndo={canUndo(editorState.history)}
+          canRedo={canRedo(editorState.history)}
+          onUndo={() => dispatch({ type: 'UNDO' })}
+          onRedo={() => dispatch({ type: 'REDO' })}
+          hasApiKey={Boolean(storedApiKey)}
+          onOpenSettings={() => setIsSettingsOpen(true)}
+          onOpenExport={() => setIsExportOpen(true)}
+          canExport={projectValidation.ok}
+          isBusy={isBusy}
+        />
 
-        {!videoMeta || !sourceUrl ? (
-          <VideoDropzone
-            isLoading={isLoadingFile}
-            error={fileError}
-            onSelectFile={handleSelectFile}
+        <div className="flex min-h-0 flex-1 overflow-hidden">
+          <LeftMediaPanel
+            activeTab={leftTab}
+            onTabChange={setLeftTab}
+            assets={assetList}
+            totalVideoBytes={totalVideoBytes}
+            videoClipCount={videoClips.length}
+            isLoadingMedia={isLoadingMedia}
+            mediaError={mediaError}
+            onDismissMediaError={() => setMediaError(null)}
+            onImportVideos={(files) => void handleImportVideos(files)}
+            onImportAudios={(files) => void handleImportAudios(files)}
+            onImportImages={(files) => void handleImportImages(files)}
+            onImportFiles={(files) => void handleImportFiles(files)}
+            onAddAssetToTimeline={handleAddAssetToTimeline}
+            onRemoveAsset={handleRemoveAsset}
+            onAddTextClip={handleAddTextClip}
+            hasVideo={Boolean(firstVideoAsset)}
+            hasApiKey={Boolean(storedApiKey)}
+            captionLanguage={captionLanguage}
+            onCaptionLanguageChange={setCaptionLanguage}
+            isGeneratingCaptions={isGeneratingCaptions}
+            captionStatus={captionStatus}
+            captionError={captionError}
+            hasCaptions={captionSegments.length > 0}
+            onGenerateCaptions={() => void handleGenerateCaptions()}
+            onCancelCaptions={handleCancelCaptions}
+            onDownloadSrt={handleDownloadSrt}
+            onOpenSettings={() => setIsSettingsOpen(true)}
+            isBusy={isBusy}
           />
-        ) : (
-          <div className="grid grid-cols-1 items-start gap-6 lg:grid-cols-[1fr_340px]">
-            {/* Left stage: Player + Timeline */}
-            <div className="flex flex-col gap-5">
-              {fileError && (
-                <div
-                  role="alert"
-                  className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200"
-                >
-                  {fileError}
-                </div>
-              )}
 
-              {/* Video preview stage */}
-              <section
-                aria-label="Video preview"
-                className="overflow-hidden rounded-xl border border-[#232A38] bg-[#131720]"
-              >
-                <div className="flex aspect-video w-full items-center justify-center bg-black">
-                  <video
-                    ref={videoRef}
-                    src={sourceUrl}
-                    playsInline
-                    onClick={handleTogglePlay}
-                    onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
-                    onPlay={() => setIsPlaying(true)}
-                    onPause={() => setIsPlaying(false)}
-                    onEnded={() => setIsPlaying(false)}
-                    className="h-full w-full cursor-pointer object-contain"
-                  />
-                </div>
+          <PreviewCanvas
+            project={project}
+            assets={assetsMap}
+            playhead={playhead}
+            selectedClipId={selectedClipId}
+            isPlaying={isPlaying}
+            isPreviewMuted={isPreviewMuted}
+            isBusy={isBusy}
+            onTogglePlay={handleTogglePlay}
+            onPlayheadChange={handlePlayheadChange}
+            onStepFrame={handleStepFrame}
+            onTogglePreviewMuted={() => setIsPreviewMuted((p) => !p)}
+            onSelectClip={handleSelectClip}
+            onBeginDragTransaction={handleBeginDragTransaction}
+            onUpdateClipProps={handleUpdateClipProps}
+            onCommitDragTransaction={handleCommitDragTransaction}
+            onSplitAtPlayhead={handleSplitAtPlayhead}
+            onImportVideos={(files) => void handleImportVideos(files)}
+          />
 
-                {/* Transport controls bar */}
-                <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#232A38] px-4 py-3">
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={handleTogglePlay}
-                      aria-label={isPlaying ? 'Pause video' : 'Play video'}
-                      className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg bg-[#1D2433] px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#263044] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-400 whitespace-nowrap shrink-0"
-                    >
-                      {isPlaying ? (
-                        <Pause className="h-3.5 w-3.5" aria-hidden="true" />
-                      ) : (
-                        <Play className="h-3.5 w-3.5" aria-hidden="true" />
-                      )}
-                      <span>{isPlaying ? 'Pause' : 'Play'}</span>
-                    </button>
+          <InspectorPanel
+            selectedClip={selectedClip}
+            onUpdateClip={handleUpdateClipProps}
+            onDeleteClip={handleDeleteClip}
+            disabled={isBusy}
+          />
+        </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleSeek(Number.isFinite(trimStart) ? trimStart : 0)}
-                      title="Jump to trim start"
-                      className="inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-[#232A38] bg-[#0B0D11] px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-[#323C50] hover:text-white whitespace-nowrap shrink-0"
-                    >
-                      <SkipBack className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>In</span>
-                    </button>
+        <Timeline
+          project={project}
+          assets={assetsMap}
+          playhead={playhead}
+          selectedClipId={selectedClipId}
+          zoomPxPerSec={zoomPxPerSec}
+          snapEnabled={snapEnabled}
+          disabled={isBusy}
+          onSelectClip={handleSelectClip}
+          onPlayheadChange={handlePlayheadChange}
+          onZoomChange={(zoom) => dispatch({ type: 'SET_ZOOM', zoomPxPerSec: zoom })}
+          onToggleSnap={() => dispatch({ type: 'TOGGLE_SNAP' })}
+          onBeginDragTransaction={handleBeginDragTransaction}
+          onMoveClip={handleMoveClip}
+          onResizeClip={handleResizeClip}
+          onCommitDragTransaction={handleCommitDragTransaction}
+          onSplitAtPlayhead={handleSplitAtPlayhead}
+          onDuplicateSelected={handleDuplicateSelected}
+          onDeleteSelected={handleDeleteSelected}
+          onAddTrackRow={(kind) => dispatch({ type: 'ADD_TRACK_ROW', kind })}
+          onToggleTrackMute={(trackId) => dispatch({ type: 'TOGGLE_TRACK_MUTE', trackId })}
+          onToggleTrackHide={(trackId) => dispatch({ type: 'TOGGLE_TRACK_HIDE', trackId })}
+          onDropAssetOnTimeline={handleDropAssetOnTimeline}
+        />
+      </div>
 
-                    <button
-                      type="button"
-                      onClick={() =>
-                        handleSeek(Number.isFinite(trimEnd) ? trimEnd : videoMeta.duration)
-                      }
-                      title="Jump to trim end"
-                      className="inline-flex min-h-[40px] items-center gap-1 rounded-lg border border-[#232A38] bg-[#0B0D11] px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-[#323C50] hover:text-white whitespace-nowrap shrink-0"
-                    >
-                      <span>Out</span>
-                      <SkipForward className="h-3.5 w-3.5" aria-hidden="true" />
-                    </button>
-                  </div>
+      <SettingsDialog
+        isOpen={isSettingsOpen}
+        hasStoredKey={Boolean(storedApiKey)}
+        storedKeyPreview={storedApiKey}
+        onClose={() => setIsSettingsOpen(false)}
+        onSaveKey={handleSaveApiKey}
+        onRemoveKey={handleRemoveApiKey}
+      />
 
-                  <div className="flex items-center gap-3">
-                    <div className="font-mono text-xs text-slate-300 tabular-nums">
-                      <span>{formatTimecode(currentTime)}</span>
-                      <span className="mx-1.5 text-slate-600">/</span>
-                      <span className="text-slate-400">{formatTimecode(videoMeta.duration)}</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={handleToggleMute}
-                      aria-label={isMuted ? 'Unmute video' : 'Mute video'}
-                      className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-[#232A38] bg-[#0B0D11] text-slate-300 transition-colors hover:border-[#323C50] hover:text-white"
-                    >
-                      {isMuted ? (
-                        <VolumeX className="h-4 w-4" aria-hidden="true" />
-                      ) : (
-                        <Volume2 className="h-4 w-4" aria-hidden="true" />
-                      )}
-                    </button>
-                  </div>
-                </div>
-              </section>
-
-              {/* Dual-range trim timeline & numeric inputs */}
-              <TrimTimeline
-                duration={videoMeta.duration}
-                currentTime={currentTime}
-                startInput={startInput}
-                endInput={endInput}
-                trimStart={trimStart}
-                trimEnd={trimEnd}
-                validationError={trimValidation.ok ? null : trimValidation.error}
-                disabled={isExporting}
-                onStartInputChange={handleStartInputChange}
-                onEndInputChange={handleEndInputChange}
-                onRangeSliderChange={handleRangeSliderChange}
-                onSeek={handleSeek}
-                onSetInAtCurrent={handleSetInAtCurrent}
-                onSetOutAtCurrent={handleSetOutAtCurrent}
-              />
-            </div>
-
-            {/* Right inspector & export panel */}
-            <ExportPanel
-              videoMeta={videoMeta}
-              mode={exportMode}
-              onModeChange={setExportMode}
-              isTrimValid={trimValidation.ok}
-              trimError={trimValidation.ok ? null : trimValidation.error}
-              isExporting={isExporting}
-              progress={renderProgress}
-              exportError={exportError}
-              exportResult={exportResult}
-              exportResultUrl={exportResultUrl}
-              onExport={handleExport}
-              onCancelExport={handleCancelExport}
-              onClearResult={clearExportResult}
-              onChangeVideo={handleChangeVideo}
-            />
-          </div>
-        )}
-      </main>
+      <ExportDialog
+        isOpen={isExportOpen}
+        project={project}
+        requiresReencode={requiresReencode}
+        projectDuration={projectDuration}
+        sourceDuration={maxSourceDuration}
+        firstClipSizeLabel={firstClipSizeLabel}
+        validationError={projectValidation.ok ? null : projectValidation.error}
+        isExporting={isExporting}
+        progress={renderProgress}
+        exportError={exportError}
+        exportResult={exportResult}
+        exportResultUrl={exportResultUrl}
+        onClose={() => setIsExportOpen(false)}
+        onModeChange={(mode: ExportMode) => dispatch({ type: 'SET_EXPORT_MODE', mode })}
+        onSettingsChange={(settings: ExportSettings) =>
+          dispatch({ type: 'SET_EXPORT_SETTINGS', settings })
+        }
+        onExport={() => void handleExport()}
+        onCancelExport={handleCancelExport}
+        onClearResult={clearExportResult}
+      />
     </div>
   );
 }

@@ -1,6 +1,8 @@
 import {
   MAX_DURATION_SECONDS,
   MAX_FILE_SIZE_BYTES,
+  MAX_TOTAL_VIDEO_SIZE_BYTES,
+  MAX_VIDEO_TRACK_CLIPS,
   type ValidationResult,
   type VideoFileMetadata,
 } from './types';
@@ -257,4 +259,108 @@ export function sanitizeExportFilename(originalName: string): string {
 
   const safeBase = cleaned.length > 0 ? cleaned : 'video';
   return `${safeBase}-trimmed.mp4`;
+}
+
+export function validateTotalVideoSize(
+  existingTotalBytes: number,
+  incomingFileBytes: number
+): ValidationResult<number> {
+  const safeExisting = Number.isFinite(existingTotalBytes) && existingTotalBytes >= 0 ? existingTotalBytes : 0;
+  const safeIncoming = Number.isFinite(incomingFileBytes) && incomingFileBytes >= 0 ? incomingFileBytes : 0;
+  const combined = safeExisting + safeIncoming;
+
+  if (combined > MAX_TOTAL_VIDEO_SIZE_BYTES) {
+    return {
+      ok: false,
+      code: 'FILE_TOO_LARGE',
+      error: `Total imported video size would reach ${formatBytes(combined)}, exceeding the 400 MB project limit.`,
+    };
+  }
+
+  return { ok: true, value: combined };
+}
+
+export function validateVideoClipLimit(
+  currentClipCount: number,
+  addingCount = 1
+): ValidationResult<number> {
+  const safeCurrent = Number.isFinite(currentClipCount) && currentClipCount >= 0 ? currentClipCount : 0;
+  const nextCount = safeCurrent + Math.max(0, addingCount);
+  if (nextCount > MAX_VIDEO_TRACK_CLIPS) {
+    return {
+      ok: false,
+      code: 'INVALID_PROJECT',
+      error: `The Video track allows at most ${MAX_VIDEO_TRACK_CLIPS} clips.`,
+    };
+  }
+  return { ok: true, value: nextCount };
+}
+
+export async function captureVideoThumbnail(file: File): Promise<string | undefined> {
+  if (typeof document === 'undefined') return undefined;
+  const objectUrl = URL.createObjectURL(file);
+  const video = document.createElement('video');
+  video.preload = 'auto';
+  video.muted = true;
+  video.playsInline = true;
+
+  try {
+    return await new Promise<string | undefined>((resolve) => {
+      let settled = false;
+      const finish = (thumb: string | undefined) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        video.onloadeddata = null;
+        video.onseeked = null;
+        video.onerror = null;
+        video.removeAttribute('src');
+        video.load();
+        resolve(thumb);
+      };
+
+      const timer = window.setTimeout(() => finish(undefined), 1500);
+
+      const drawFrame = () => {
+        try {
+          if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+            finish(undefined);
+            return;
+          }
+          const targetW = 160;
+          const targetH = Math.max(48, Math.round((video.videoHeight / video.videoWidth) * targetW));
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            finish(undefined);
+            return;
+          }
+          ctx.drawImage(video, 0, 0, targetW, targetH);
+          finish(canvas.toDataURL('image/jpeg', 0.72));
+        } catch {
+          finish(undefined);
+        }
+      };
+
+      video.onloadeddata = () => {
+        const targetSeek = Number.isFinite(video.duration) && video.duration > 0.2 ? Math.min(0.25, video.duration * 0.1) : 0;
+        if (targetSeek > 0.01) {
+          video.onseeked = drawFrame;
+          try {
+            video.currentTime = targetSeek;
+          } catch {
+            drawFrame();
+          }
+        } else {
+          drawFrame();
+        }
+      };
+      video.onerror = () => finish(undefined);
+      video.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
