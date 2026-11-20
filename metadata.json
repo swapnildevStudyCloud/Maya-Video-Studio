@@ -1,0 +1,6 @@
+{
+  "name": "Maya Video Studio",
+  "description": "Client-side browser video trimmer powered by ffmpeg.wasm. Your video stays on your device.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
