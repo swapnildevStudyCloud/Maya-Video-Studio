@@ -8,6 +8,7 @@ import {
   KeyRound,
   Music,
   Plus,
+  Sparkles,
   Trash2,
   Type,
   Upload,
@@ -21,14 +22,16 @@ import {
   MAX_TOTAL_VIDEO_SIZE_BYTES,
   MAX_VIDEO_TRACK_CLIPS,
   redactApiKey,
+  VIDEO_EFFECT_CATALOG,
   type CaptionLanguageCode,
   type MediaAsset,
   type TextClipAlign,
   type TextOverlayColor,
   type TextOverlaySize,
+  type VideoEffectType,
 } from '../lib/editor';
 
-export type LeftPanelTab = 'media' | 'text' | 'audio' | 'ai';
+export type LeftPanelTab = 'media' | 'text' | 'effects' | 'audio' | 'ai';
 
 export interface TextPresetOption {
   id: string;
@@ -105,6 +108,7 @@ interface LeftMediaPanelProps {
   onAddAssetToTimeline: (asset: MediaAsset) => void;
   onRemoveAsset: (assetId: string) => void;
   onAddTextClip: (preset?: TextPresetOption) => void;
+  onAddEffectClip: (effectType: VideoEffectType) => void;
   hasVideo: boolean;
   hasApiKey: boolean;
   captionLanguage: CaptionLanguageCode;
@@ -136,6 +140,7 @@ export function LeftMediaPanel({
   onAddAssetToTimeline,
   onRemoveAsset,
   onAddTextClip,
+  onAddEffectClip,
   hasVideo,
   hasApiKey,
   captionLanguage,
@@ -217,12 +222,13 @@ export function LeftMediaPanel({
       <div
         role="tablist"
         aria-label="Asset categories"
-        className="grid grid-cols-4 border-b border-[#232A38] bg-[#11141B] p-1"
+        className="grid grid-cols-5 border-b border-[#232A38] bg-[#11141B] p-1"
       >
         {(
           [
             { id: 'media', label: 'Media', icon: FolderOpen },
             { id: 'text', label: 'Text', icon: Type },
+            { id: 'effects', label: 'Effects', icon: Sparkles },
             { id: 'audio', label: 'Audio', icon: Music },
             { id: 'ai', label: 'AI', icon: Captions },
           ] as const
@@ -446,6 +452,35 @@ export function LeftMediaPanel({
                     </p>
                   </div>
                   <Plus className="h-3.5 w-3.5 text-slate-400" aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+
+        {activeTab === 'effects' && (
+          <>
+            <span className="text-[11px] font-medium text-slate-400">
+              Click an effect to add a 3s clip at the playhead
+            </span>
+
+            <div className="flex flex-col gap-1.5">
+              {VIDEO_EFFECT_CATALOG.map((effect) => (
+                <button
+                  key={effect.type}
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => onAddEffectClip(effect.type)}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-[#232A38] bg-[#0B0D11] px-3 py-2 text-left transition-colors hover:border-amber-500/60 disabled:opacity-50"
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-slate-200">{effect.label}</p>
+                    <p className="mt-0.5 truncate text-[11px] text-slate-500">
+                      {effect.description}
+                      {!effect.hasExactCssPreview ? ' · approx preview' : ''}
+                    </p>
+                  </div>
+                  <Plus className="h-3.5 w-3.5 shrink-0 text-amber-400" aria-hidden="true" />
                 </button>
               ))}
             </div>

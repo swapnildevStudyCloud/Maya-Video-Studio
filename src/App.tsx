@@ -23,6 +23,7 @@ import {
   canUndo,
   captionsToSrt,
   captureVideoThumbnail,
+  createEffectClip,
   createInitialEditorState,
   createVideoClipFromMeta,
   DEFAULT_IMAGE_CLIP_DURATION,
@@ -30,6 +31,7 @@ import {
   extractAudioFromTrimmedRange,
   findClipInProject,
   generateCaptionsWithGemini,
+  getEffectiveTransitionDuration,
   getProjectDuration,
   getStoredGeminiApiKey,
   getVideoTrackInsertIndexAtTime,
@@ -58,8 +60,11 @@ import {
   type MediaAsset,
   type RenderProgress,
   type RenderResult,
+  type TextAnimationType,
   type TextClip,
   type VideoClip,
+  type VideoEffectType,
+  type VideoTransition,
 } from './lib/editor';
 
 function classifyDroppedFile(file: File): 'video' | 'audio' | 'image' {
@@ -104,6 +109,7 @@ export default function App() {
   playheadRef.current = playhead;
 
   const [leftTab, setLeftTab] = useState<LeftPanelTab>('media');
+  const [selectedTransitionClipId, setSelectedTransitionClipId] = useState<string | null>(null);
   const [isLoadingMedia, setIsLoadingMedia] = useState(false);
   const [mediaError, setMediaError] = useState<string | null>(null);
 
@@ -185,6 +191,19 @@ export default function App() {
     [project, selectedClipId]
   );
   const selectedClip = selectedEntry?.clip ?? null;
+
+  const selectedTransition = useMemo(() => {
+    if (!selectedTransitionClipId) return null;
+    const idx = videoClips.findIndex((c) => c.id === selectedTransitionClipId);
+    if (idx < 0 || idx >= videoClips.length - 1) return null;
+    const clip = videoClips[idx];
+    const nextClip = videoClips[idx + 1];
+    return {
+      clip,
+      nextClip,
+      effectiveDuration: getEffectiveTransitionDuration(clip, nextClip),
+    };
+  }, [selectedTransitionClipId, videoClips]);
 
   const projectDuration = useMemo(() => getProjectDuration(project), [project]);
   const projectValidation = useMemo(
@@ -572,6 +591,7 @@ export default function App() {
   const handleAddTextClip = useCallback(
     (preset?: TextPresetOption) => {
       if (isBusy) return;
+      setSelectedTransitionClipId(null);
       const text = preset?.text ?? 'Sample text';
       const clip: TextClip = {
         id: nextProjectId('txt'),
@@ -588,6 +608,20 @@ export default function App() {
         xPercent: preset?.xPercent ?? 50,
         yPercent: preset?.yPercent ?? 50,
       };
+      dispatch({ type: 'ADD_CLIP', clip });
+    },
+    [isBusy]
+  );
+
+  const handleAddEffectClip = useCallback(
+    (effectType: VideoEffectType) => {
+      if (isBusy) return;
+      setSelectedTransitionClipId(null);
+      const clip = createEffectClip({
+        id: nextProjectId('efx'),
+        effectType,
+        start: playheadRef.current,
+      });
       dispatch({ type: 'ADD_CLIP', clip });
     },
     [isBusy]
@@ -612,8 +646,35 @@ export default function App() {
   }, []);
 
   const handleSelectClip = useCallback((clipId: string | null) => {
+    if (clipId !== null) setSelectedTransitionClipId(null);
     dispatch({ type: 'SELECT_CLIP', clipId });
   }, []);
+
+  const handleSelectTransition = useCallback((clipId: string | null) => {
+    if (clipId !== null) {
+      dispatch({ type: 'SELECT_CLIP', clipId: null });
+    }
+    setSelectedTransitionClipId(clipId);
+  }, []);
+
+  const handleSetVideoTransition = useCallback(
+    (clipId: string, transition: VideoTransition | undefined) => {
+      dispatch({ type: 'SET_VIDEO_TRANSITION', clipId, transition });
+    },
+    []
+  );
+
+  const handleApplyAnimationToAllCaptions = useCallback(
+    (config: {
+      animInType: TextAnimationType;
+      animInDuration: number;
+      animOutType: TextAnimationType;
+      animOutDuration: number;
+    }) => {
+      dispatch({ type: 'APPLY_ANIMATION_TO_ALL_CAPTIONS', ...config });
+    },
+    []
+  );
 
   const handleBeginDragTransaction = useCallback(() => {
     dispatch({ type: 'BEGIN_EDIT_TRANSACTION' });
@@ -982,6 +1043,7 @@ export default function App() {
             onAddAssetToTimeline={handleAddAssetToTimeline}
             onRemoveAsset={handleRemoveAsset}
             onAddTextClip={handleAddTextClip}
+            onAddEffectClip={handleAddEffectClip}
             hasVideo={Boolean(firstVideoAsset)}
             hasApiKey={Boolean(storedApiKey)}
             captionLanguage={captionLanguage}
@@ -1019,8 +1081,12 @@ export default function App() {
 
           <InspectorPanel
             selectedClip={selectedClip}
+            selectedTransition={selectedTransition}
+            hasCaptions={captionSegments.length > 0}
             onUpdateClip={handleUpdateClipProps}
             onDeleteClip={handleDeleteClip}
+            onSetVideoTransition={handleSetVideoTransition}
+            onApplyAnimationToAllCaptions={handleApplyAnimationToAllCaptions}
             disabled={isBusy}
           />
         </div>
@@ -1030,10 +1096,12 @@ export default function App() {
           assets={assetsMap}
           playhead={playhead}
           selectedClipId={selectedClipId}
+          selectedTransitionClipId={selectedTransitionClipId}
           zoomPxPerSec={zoomPxPerSec}
           snapEnabled={snapEnabled}
           disabled={isBusy}
           onSelectClip={handleSelectClip}
+          onSelectTransition={handleSelectTransition}
           onPlayheadChange={handlePlayheadChange}
           onZoomChange={(zoom) => dispatch({ type: 'SET_ZOOM', zoomPxPerSec: zoom })}
           onToggleSnap={() => dispatch({ type: 'TOGGLE_SNAP' })}

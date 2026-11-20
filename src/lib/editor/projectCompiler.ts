@@ -1,4 +1,12 @@
 import { wrapCaptionTextForBurnIn } from './captions';
+import {
+  buildDrawtextAnimationExpressions,
+  buildEffectFilterChain,
+  compileVideoTransitionsChain,
+  resolveTextClipAnimationConfig,
+  validateEffectClip,
+  validateVideoTransition,
+} from './effectsAndAnimations';
 import { buildFfmpegArgs, type ExportPlan, type ExtraMediaFile, type VirtualTextFile } from './ffmpegArgs';
 import { getProjectDuration } from './projectReducer';
 import { hasActiveColorFilter } from './toolsValidation';
@@ -14,7 +22,10 @@ import {
   ALLOWED_ROTATIONS,
   ALLOWED_SPEEDS,
   ALLOWED_TEXT_ALIGNS,
+  ALLOWED_TEXT_ANIMATIONS,
   DEFAULT_EXPORT_FPS,
+  DRAFT_EXPORT_FPS,
+  DRAFT_MAX_SHORT_SIDE,
   INTERNAL_FONT_FILENAME,
   INTERNAL_INPUT_FILENAME,
   INTERNAL_OUTPUT_AUDIO_FILENAME,
@@ -22,16 +33,19 @@ import {
   MAX_ADDED_AUDIO_FADE_SECONDS,
   MAX_FADE_SECONDS,
   MAX_IMAGE_SIZE_PERCENT,
+  MAX_TEXT_ANIMATION_SECONDS,
   MAX_TEXT_CLIP_LENGTH,
   MAX_VIDEO_TRACK_CLIPS,
   MAX_VOLUME_PERCENT,
   MIN_IMAGE_SIZE_PERCENT,
+  MIN_TEXT_ANIMATION_SECONDS,
   MIN_TRIM_DURATION_SECONDS,
   MIN_VOLUME_PERCENT,
   type AudioClip,
   type CanvasFitMode,
   type CaptionSegment,
   type CropAspectRatio,
+  type EffectClip,
   type ExportCanvasPreset,
   type ExportQuality,
   type ExportResolution,
@@ -69,6 +83,8 @@ function getQualitySettings(quality: ExportQuality): {
   mp3Bitrate: string;
 } {
   switch (quality) {
+    case 'draft':
+      return { crf: '30', aacBitrate: '96k', mp3Bitrate: '128k' };
     case 'small':
       return { crf: '28', aacBitrate: '96k', mp3Bitrate: '128k' };
     case 'high':
@@ -88,65 +104,82 @@ export function resolveProjectCanvasDimensions(params: {
   const { project, assets, videoClips } = params;
   const preset: ExportCanvasPreset = project.exportSettings.canvasPreset ?? 'original';
 
+  let finalW = 0;
+  let finalH = 0;
+
   if (preset === '1080p-16:9') {
-    return { width: 1920, height: 1080 };
-  }
-  if (preset === '720p-16:9') {
-    return { width: 1280, height: 720 };
-  }
-  if (preset === '9:16') {
-    return { width: 720, height: 1280 };
-  }
-  if (preset === '1:1') {
-    return { width: 720, height: 720 };
-  }
+    finalW = 1920;
+    finalH = 1080;
+  } else if (preset === '720p-16:9') {
+    finalW = 1280;
+    finalH = 720;
+  } else if (preset === '9:16') {
+    finalW = 720;
+    finalH = 1280;
+  } else if (preset === '1:1') {
+    finalW = 720;
+    finalH = 720;
+  } else {
+    // 'original': default to first video clip's source size
+    const firstClip = videoClips[0];
+    const firstAsset = firstClip ? assets.get(firstClip.assetId) : undefined;
+    let w =
+      firstAsset && firstAsset.kind === 'video' && firstAsset.width > 0
+        ? firstAsset.width
+        : (params.videoWidth && params.videoWidth > 0 ? params.videoWidth : 1280);
+    let h =
+      firstAsset && firstAsset.kind === 'video' && firstAsset.height > 0
+        ? firstAsset.height
+        : (params.videoHeight && params.videoHeight > 0 ? params.videoHeight : 720);
 
-  // 'original': default to first video clip's source size
-  const firstClip = videoClips[0];
-  const firstAsset = firstClip ? assets.get(firstClip.assetId) : undefined;
-  let w =
-    firstAsset && firstAsset.kind === 'video' && firstAsset.width > 0
-      ? firstAsset.width
-      : (params.videoWidth && params.videoWidth > 0 ? params.videoWidth : 1280);
-  let h =
-    firstAsset && firstAsset.kind === 'video' && firstAsset.height > 0
-      ? firstAsset.height
-      : (params.videoHeight && params.videoHeight > 0 ? params.videoHeight : 720);
+    // If single clip has explicit crop/rotate on Original canvas, honor it cleanly
+    if (videoClips.length === 1 && firstClip) {
+      if (firstClip.cropAspect === '9:16') {
+        const targetW = Math.min(w, (h * 9) / 16);
+        const targetH = Math.min(h, (w * 16) / 9);
+        w = targetW;
+        h = targetH;
+      } else if (firstClip.cropAspect === '1:1') {
+        const side = Math.min(w, h);
+        w = side;
+        h = side;
+      } else if (firstClip.cropAspect === '16:9') {
+        const targetW = Math.min(w, (h * 16) / 9);
+        const targetH = Math.min(h, (w * 9) / 16);
+        w = targetW;
+        h = targetH;
+      }
 
-  // If single clip has explicit crop/rotate on Original canvas, honor it cleanly
-  if (videoClips.length === 1 && firstClip) {
-    if (firstClip.cropAspect === '9:16') {
-      const targetW = Math.min(w, (h * 9) / 16);
-      const targetH = Math.min(h, (w * 16) / 9);
-      w = targetW;
-      h = targetH;
-    } else if (firstClip.cropAspect === '1:1') {
-      const side = Math.min(w, h);
-      w = side;
-      h = side;
-    } else if (firstClip.cropAspect === '16:9') {
-      const targetW = Math.min(w, (h * 16) / 9);
-      const targetH = Math.min(h, (w * 9) / 16);
-      w = targetW;
-      h = targetH;
+      if (firstClip.rotationDegrees === 90 || firstClip.rotationDegrees === 270) {
+        const tmp = w;
+        w = h;
+        h = tmp;
+      }
     }
 
-    if (firstClip.rotationDegrees === 90 || firstClip.rotationDegrees === 270) {
-      const tmp = w;
-      w = h;
-      h = tmp;
+    const maxH = getResolutionTargetHeight(project.exportSettings.resolution);
+    if (maxH !== null && h > maxH) {
+      w = (w * maxH) / h;
+      h = maxH;
     }
+
+    finalW = w;
+    finalH = h;
   }
 
-  const maxH = getResolutionTargetHeight(project.exportSettings.resolution);
-  if (maxH !== null && h > maxH) {
-    w = (w * maxH) / h;
-    h = maxH;
+  // Draft (480p, fast) caps short side to 480px while preserving aspect ratio
+  if (project.exportSettings.quality === 'draft') {
+    const shortSide = Math.min(finalW, finalH);
+    if (shortSide > DRAFT_MAX_SHORT_SIDE && shortSide > 0) {
+      const scale = DRAFT_MAX_SHORT_SIDE / shortSide;
+      finalW *= scale;
+      finalH *= scale;
+    }
   }
 
   return {
-    width: Math.max(2, Math.floor(w / 2) * 2),
-    height: Math.max(2, Math.floor(h / 2) * 2),
+    width: Math.max(2, Math.floor(finalW / 2) * 2),
+    height: Math.max(2, Math.floor(finalH / 2) * 2),
   };
 }
 
@@ -227,7 +260,8 @@ export function isSingleSimpleVideoClipProject(project: ProjectState): boolean {
     vc.cropAspect !== 'original' ||
     hasActiveColorFilter(vc.colorFilter) ||
     vc.fadeInSeconds > 0 ||
-    vc.fadeOutSeconds > 0
+    vc.fadeOutSeconds > 0 ||
+    (vc.transitionOut && vc.transitionOut.type !== 'none')
   ) {
     return false;
   }
@@ -375,6 +409,15 @@ export function validateProjectForExport(
             error: `Invalid color filter preset on "${clip.name}".`,
           };
         }
+        const trValidation = validateVideoTransition(clip.transitionOut);
+        if (!trValidation.ok) {
+          return trValidation;
+        }
+      } else if (clip.type === 'effect') {
+        const effValidation = validateEffectClip(clip);
+        if (!effValidation.ok) {
+          return effValidation;
+        }
       } else if (clip.type === 'text') {
         if (clip.text.length > MAX_TEXT_CLIP_LENGTH) {
           return {
@@ -392,6 +435,30 @@ export function validateProjectForExport(
             ok: false,
             code: 'INVALID_TOOL_CONFIG',
             error: `Text clip "${clip.name}" has invalid styling options.`,
+          };
+        }
+        if (
+          (clip.animInType && !ALLOWED_TEXT_ANIMATIONS.includes(clip.animInType)) ||
+          (clip.animOutType && !ALLOWED_TEXT_ANIMATIONS.includes(clip.animOutType))
+        ) {
+          return {
+            ok: false,
+            code: 'INVALID_TOOL_CONFIG',
+            error: `Text clip "${clip.name}" has an unsupported animation type.`,
+          };
+        }
+        if (
+          (clip.animInDuration !== undefined &&
+            (clip.animInDuration < MIN_TEXT_ANIMATION_SECONDS ||
+              clip.animInDuration > MAX_TEXT_ANIMATION_SECONDS)) ||
+          (clip.animOutDuration !== undefined &&
+            (clip.animOutDuration < MIN_TEXT_ANIMATION_SECONDS ||
+              clip.animOutDuration > MAX_TEXT_ANIMATION_SECONDS))
+        ) {
+          return {
+            ok: false,
+            code: 'INVALID_TOOL_CONFIG',
+            error: `Text animations on "${clip.name}" must be between ${MIN_TEXT_ANIMATION_SECONDS} and ${MAX_TEXT_ANIMATION_SECONDS} s.`,
           };
         }
       } else if (clip.type === 'image') {
@@ -499,7 +566,9 @@ export function compileProjectToFfmpegPlan(params: {
   const isAudioOnly = project.exportSettings.audioOnlyMp3;
   const quality = getQualitySettings(project.exportSettings.quality);
   const canvasFit: CanvasFitMode = project.exportSettings.canvasFit ?? 'fit';
-  const exportFps = project.exportSettings.fps ?? DEFAULT_EXPORT_FPS;
+  const rawFps = project.exportSettings.fps ?? DEFAULT_EXPORT_FPS;
+  const exportFps =
+    project.exportSettings.quality === 'draft' ? Math.min(rawFps, DRAFT_EXPORT_FPS) : rawFps;
   const projectDuration = Math.max(0.5, getProjectDuration(project));
 
   const canvasDims = resolveProjectCanvasDimensions({
@@ -610,28 +679,30 @@ export function compileProjectToFfmpegPlan(params: {
     }
   }
 
+  const activeEffectClips: EffectClip[] = [];
+  if (!isAudioOnly) {
+    for (const track of project.tracks) {
+      if (track.kind !== 'effects' || track.hidden) continue;
+      for (const clip of [...track.clips].sort((a, b) => a.start - b.start)) {
+        if (clip.type === 'effect' && clip.intensity > 0) {
+          activeEffectClips.push(clip);
+        }
+      }
+    }
+    activeEffectClips.sort((a, b) => a.start - b.start);
+  }
+
   const args: string[] = [...inputFileArgs];
   const filterParts: string[] = [];
   const textFiles: VirtualTextFile[] = [];
 
-  // 1. Compile ripple video track clips (per-clip trim, transforms, Fit/Fill scale, fps, fades -> concat)
+  // 1. Prepare per-clip video + audio segments and compile transitions (`xfade` / `acrossfade`)
   let videoLabel: string | null = null;
+  const videoSegLabels: string[] = [];
   if (!isAudioOnly) {
-    const videoSegLabels: string[] = [];
-    let cursor = 0;
-
     videoClips.forEach((vc, segIdx) => {
       const mapped = videoAssetInputMap.get(vc.assetId);
       if (!mapped) return;
-
-      const gap = vc.start - cursor;
-      if (gap > 0.02) {
-        const gapLbl = `[vgap${segIdx}]`;
-        filterParts.push(
-          `color=c=black:s=${canvasDims.width}x${canvasDims.height}:d=${formatSecondsArg(gap)}:r=${exportFps},setsar=1${gapLbl}`
-        );
-        videoSegLabels.push(gapLbl);
-      }
 
       const srcStart = Math.max(0, vc.sourceOffset);
       const srcEnd = Math.min(vc.sourceDuration, vc.sourceOffset + vc.duration * vc.speed);
@@ -705,91 +776,14 @@ export function compileProjectToFfmpegPlan(params: {
       const segLbl = `[vseg${segIdx}]`;
       filterParts.push(`[${mapped.inputIdx}:v]${steps.join(',')}${segLbl}`);
       videoSegLabels.push(segLbl);
-      cursor = Math.max(cursor, vc.start + vc.duration);
     });
-
-    if (videoSegLabels.length === 1) {
-      videoLabel = videoSegLabels[0];
-    } else if (videoSegLabels.length > 1) {
-      filterParts.push(
-        `${videoSegLabels.join('')}concat=n=${videoSegLabels.length}:v=1:a=0[vbase]`
-      );
-      videoLabel = '[vbase]';
-    }
-
-    // 2. Image overlay clips
-    activeImageEntries.forEach((entry, idx) => {
-      if (!videoLabel) return;
-      const { clip, inputIdx } = entry;
-      const targetWidth = Math.max(
-        2,
-        Math.round(((canvasDims.width * clip.sizePercent) / 100) / 2) * 2
-      );
-      const opacity = (clip.opacityPercent / 100).toFixed(2);
-      const xFactor = (clip.xPercent / 100).toFixed(3);
-      const yFactor = (clip.yPercent / 100).toFixed(3);
-      const s = formatSecondsArg(clip.start);
-      const e = formatSecondsArg(clip.start + clip.duration);
-
-      filterParts.push(
-        `[${inputIdx}:v]format=rgba,colorchannelmixer=aa=${opacity},scale=${targetWidth}:-2[ovimg${idx}]`
-      );
-      filterParts.push(
-        `${videoLabel}[ovimg${idx}]overlay=x=(W-w)*${xFactor}:y=(H-h)*${yFactor}:enable='between(t,${s},${e})'[vimg${idx}]`
-      );
-      videoLabel = `[vimg${idx}]`;
-    });
-
-    // 3. Text & caption clips via drawtext + textfile=
-    if (activeTextClips.length > 0 && videoLabel) {
-      const drawFilters: string[] = [];
-      activeTextClips.forEach(({ clip, isCaption }, idx) => {
-        const filename = `text_${idx}.txt`;
-        const cleaned = sanitizeProjectTextContent(clip.text);
-        textFiles.push({
-          path: filename,
-          content: isCaption ? wrapCaptionTextForBurnIn(cleaned) : cleaned,
-        });
-
-        const fontSize = getTextFontSize(clip.size, canvasDims.height);
-        const contrastOrBox = getTextContrastOrBox(clip, clip.color);
-        const xFactor = (clip.xPercent / 100).toFixed(3);
-        const yFactor = (clip.yPercent / 100).toFixed(3);
-        const xExpr =
-          clip.align === 'left'
-            ? `w*${xFactor}`
-            : clip.align === 'right'
-              ? `w*${xFactor}-text_w`
-              : `w*${xFactor}-text_w/2`;
-        const yExpr = `h*${yFactor}-text_h/2`;
-        const s = formatSecondsArg(clip.start);
-        const e = formatSecondsArg(clip.start + clip.duration);
-
-        drawFilters.push(
-          `drawtext=fontfile=${INTERNAL_FONT_FILENAME}:textfile=${filename}:expansion=none:fontsize=${fontSize}:fontcolor=${clip.color}:${contrastOrBox}:x=${xExpr}:y=${yExpr}:enable='between(t,${s},${e})'`
-        );
-      });
-
-      filterParts.push(`${videoLabel}${drawFilters.join(',')}[vtext]`);
-      videoLabel = '[vtext]';
-    }
   }
 
-  // 4. Audio compilation (video track clips with silence fallback for silent clips + audio track clips -> amix)
+  // Video track audio segments
   const audioMixInputs: string[] = [];
-
+  const segAudioLabels: string[] = [];
   if (anyVideoAudio && allTrackVideoClips.length > 0) {
-    const segAudioLabels: string[] = [];
-    let aCursor = 0;
-
     allTrackVideoClips.forEach((vc, aIdx) => {
-      const gap = vc.start - aCursor;
-      if (gap > 0.02) {
-        const gapLbl = `[agap${aIdx}]`;
-        filterParts.push(`anullsrc=r=44100:cl=stereo:d=${formatSecondsArg(gap)}${gapLbl}`);
-        segAudioLabels.push(gapLbl);
-      }
-
       const lbl = `[aseg${aIdx}]`;
       const mapped = videoAssetInputMap.get(vc.assetId);
 
@@ -821,23 +815,129 @@ export function compileProjectToFfmpegPlan(params: {
         }
         filterParts.push(`[${mapped.inputIdx}:a]${aSteps.join(',')}${lbl}`);
       } else {
-        // Insert silence matching this clip's timeline duration
         filterParts.push(
           `anullsrc=r=44100:cl=stereo:d=${formatSecondsArg(vc.duration)}${lbl}`
         );
       }
 
       segAudioLabels.push(lbl);
-      aCursor = Math.max(aCursor, vc.start + vc.duration);
+    });
+  }
+
+  // Compile pairwise xfade/acrossfade transitions or concat across video clips
+  if (!isAudioOnly && videoSegLabels.length > 0) {
+    const canPairAudio =
+      segAudioLabels.length === videoSegLabels.length && segAudioLabels.length > 0;
+    const transitionResult = compileVideoTransitionsChain({
+      videoSegLabels,
+      videoClips,
+      audioSegLabels: canPairAudio ? segAudioLabels : undefined,
+    });
+    filterParts.push(...transitionResult.videoFilterParts);
+    filterParts.push(...transitionResult.audioFilterParts);
+    videoLabel = transitionResult.videoOutputLabel;
+    if (transitionResult.audioOutputLabel) {
+      audioMixInputs.push(transitionResult.audioOutputLabel);
+    }
+  } else if (segAudioLabels.length > 0) {
+    // Audio-only or hidden video track: preserve transition timing on video audio
+    const audioTr = compileVideoTransitionsChain({
+      videoSegLabels: segAudioLabels,
+      videoClips: allTrackVideoClips,
+      audioSegLabels: segAudioLabels,
+    });
+    if (audioTr.audioOutputLabel) {
+      filterParts.push(...audioTr.audioFilterParts);
+      audioMixInputs.push(audioTr.audioOutputLabel);
+    }
+  }
+
+  // 1.5. VFX Effects track clips (applied onto assembled base video stream)
+  if (!isAudioOnly && videoLabel && activeEffectClips.length > 0) {
+    activeEffectClips.forEach((effect, idx) => {
+      if (!videoLabel) return;
+      const chain = buildEffectFilterChain({
+        inputLabel: videoLabel,
+        effect,
+        width: canvasDims.width,
+        height: canvasDims.height,
+        fps: exportFps,
+        index: idx,
+      });
+      if (chain) {
+        filterParts.push(...chain.filterFragments);
+        videoLabel = chain.outputLabel;
+      }
+    });
+  }
+
+  // 2. Image overlay clips
+  if (!isAudioOnly) {
+    activeImageEntries.forEach((entry, idx) => {
+      if (!videoLabel) return;
+      const { clip, inputIdx } = entry;
+      const targetWidth = Math.max(
+        2,
+        Math.round(((canvasDims.width * clip.sizePercent) / 100) / 2) * 2
+      );
+      const opacity = (clip.opacityPercent / 100).toFixed(2);
+      const xFactor = (clip.xPercent / 100).toFixed(3);
+      const yFactor = (clip.yPercent / 100).toFixed(3);
+      const s = formatSecondsArg(clip.start);
+      const e = formatSecondsArg(clip.start + clip.duration);
+
+      filterParts.push(
+        `[${inputIdx}:v]format=rgba,colorchannelmixer=aa=${opacity},scale=${targetWidth}:-2[ovimg${idx}]`
+      );
+      filterParts.push(
+        `${videoLabel}[ovimg${idx}]overlay=x=(W-w)*${xFactor}:y=(H-h)*${yFactor}:enable='between(t,${s},${e})'[vimg${idx}]`
+      );
+      videoLabel = `[vimg${idx}]`;
     });
 
-    if (segAudioLabels.length === 1) {
-      audioMixInputs.push(segAudioLabels[0]);
-    } else if (segAudioLabels.length > 1) {
-      filterParts.push(
-        `${segAudioLabels.join('')}concat=n=${segAudioLabels.length}:v=0:a=1[aorig]`
-      );
-      audioMixInputs.push('[aorig]');
+    // 3. Text & caption clips via drawtext + textfile= (with animations)
+    if (activeTextClips.length > 0 && videoLabel) {
+      const drawFilters: string[] = [];
+      activeTextClips.forEach(({ clip, isCaption }, idx) => {
+        const filename = `text_${idx}.txt`;
+        const cleaned = sanitizeProjectTextContent(clip.text);
+        textFiles.push({
+          path: filename,
+          content: isCaption ? wrapCaptionTextForBurnIn(cleaned) : cleaned,
+        });
+
+        const fontSize = getTextFontSize(clip.size, canvasDims.height);
+        const contrastOrBox = getTextContrastOrBox(clip, clip.color);
+        const xFactor = (clip.xPercent / 100).toFixed(3);
+        const yFactor = (clip.yPercent / 100).toFixed(3);
+        const baseXExpr =
+          clip.align === 'left'
+            ? `w*${xFactor}`
+            : clip.align === 'right'
+              ? `w*${xFactor}-text_w`
+              : `w*${xFactor}-text_w/2`;
+        const baseYExpr = `h*${yFactor}-text_h/2`;
+        const animCfg = resolveTextClipAnimationConfig(clip);
+        const anim = buildDrawtextAnimationExpressions({
+          start: clip.start,
+          duration: clip.duration,
+          baseFontSize: fontSize,
+          baseXExpr,
+          baseYExpr,
+          ...animCfg,
+        });
+
+        const s = formatSecondsArg(clip.start);
+        const e = formatSecondsArg(clip.start + clip.duration);
+        const alphaPart = anim.alphaExpr ? `:alpha=${anim.alphaExpr}` : '';
+
+        drawFilters.push(
+          `drawtext=fontfile=${INTERNAL_FONT_FILENAME}:textfile=${filename}:expansion=none:fontsize=${anim.fontsizeExpr}:fontcolor=${clip.color}${alphaPart}:${contrastOrBox}:x=${anim.xExpr}:y=${anim.yExpr}:enable='between(t,${s},${e})'`
+        );
+      });
+
+      filterParts.push(`${videoLabel}${drawFilters.join(',')}[vtext]`);
+      videoLabel = '[vtext]';
     }
   }
 

@@ -111,6 +111,8 @@ function getQualitySettings(quality: ExportQuality): {
   mp3Bitrate: string;
 } {
   switch (quality) {
+    case 'draft':
+      return { crf: '30', aacBitrate: '96k', mp3Bitrate: '128k' };
     case 'small':
       return { crf: '28', aacBitrate: '96k', mp3Bitrate: '128k' };
     case 'high':

@@ -5,6 +5,7 @@ import {
   ALLOWED_CANVAS_PRESETS,
   ALLOWED_EXPORT_QUALITIES,
   formatBytes,
+  getHeavyExportWarningInfo,
   SLOW_REENCODE_WARNING_SECONDS,
   type CanvasFitMode,
   type ExportCanvasPreset,
@@ -38,6 +39,7 @@ interface ExportDialogProps {
 }
 
 const QUALITY_LABELS: Record<ExportQuality, string> = {
+  draft: 'Draft (480p, fast)',
   small: 'Small',
   balanced: 'Balanced',
   high: 'High',
@@ -112,6 +114,9 @@ export function ExportDialog({
     effectiveMode === 'precise' &&
     (sourceDuration > SLOW_REENCODE_WARNING_SECONDS ||
       projectDuration > SLOW_REENCODE_WARNING_SECONDS);
+  const heavyEffectsWarning = getHeavyExportWarningInfo(project, projectDuration);
+  const showHeavyEffectsWarning =
+    !exportSettings.audioOnlyMp3 && heavyEffectsWarning.hasManyEffectsOnLongVideo;
 
   return (
     <div
@@ -225,14 +230,14 @@ export function ExportDialog({
 
           <div>
             <span className="mb-1.5 block text-xs font-medium text-slate-300">Quality</span>
-            <div className="grid grid-cols-3 gap-1 rounded-lg border border-[#232A38] bg-[#0B0D11] p-1">
+            <div className="grid grid-cols-2 gap-1 rounded-lg border border-[#232A38] bg-[#0B0D11] p-1 sm:grid-cols-4">
               {ALLOWED_EXPORT_QUALITIES.map((q) => (
                 <button
                   key={q}
                   type="button"
                   disabled={isExporting}
                   onClick={() => onSettingsChange({ ...exportSettings, quality: q })}
-                  className={`h-8 rounded-lg text-xs font-medium transition-colors ${
+                  className={`h-8 rounded-lg px-2 text-xs font-medium whitespace-nowrap transition-colors ${
                     exportSettings.quality === q
                       ? 'bg-[#1D2433] text-white'
                       : 'text-slate-400 hover:text-slate-200'
@@ -242,6 +247,11 @@ export function ExportDialog({
                 </button>
               ))}
             </div>
+            {exportSettings.quality === 'draft' && !exportSettings.audioOnlyMp3 && (
+              <p className="mt-1.5 text-[11px] text-slate-400">
+                Draft caps output short side at 480p and up to 24 fps for quicker browser exports.
+              </p>
+            )}
           </div>
 
           {!exportSettings.audioOnlyMp3 && (
@@ -286,6 +296,15 @@ export function ExportDialog({
               <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" aria-hidden="true" />
               <span>
                 This project is over 2 minutes long — re-encoding in the browser may be slow.
+              </span>
+            </div>
+          )}
+
+          {showHeavyEffectsWarning && (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" aria-hidden="true" />
+              <span>
+                This project has {heavyEffectsWarning.activeEffectCount} effects over a 1+ minute timeline. Rendering may take longer or run low on browser memory — consider <strong>Draft (480p, fast)</strong>.
               </span>
             </div>
           )}

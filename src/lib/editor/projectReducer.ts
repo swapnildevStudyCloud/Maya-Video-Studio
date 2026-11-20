@@ -1,4 +1,10 @@
 import {
+  clampEffectIntensity,
+  clampTextAnimationDuration,
+  getEffectiveTransitionDuration,
+  normalizeVideoTransition,
+} from './effectsAndAnimations';
+import {
   canRedo,
   canUndo,
   createHistory,
@@ -24,9 +30,12 @@ import {
   ALLOWED_ROTATIONS,
   ALLOWED_SPEEDS,
   ALLOWED_TEXT_ALIGNS,
+  ALLOWED_TEXT_ANIMATIONS,
+  ALLOWED_VIDEO_EFFECTS,
   createDefaultColorFilter,
   createDefaultExportSettings,
   DEFAULT_EXPORT_FPS,
+  DEFAULT_TEXT_ANIMATION_SECONDS,
   MAX_ADDED_AUDIO_FADE_SECONDS,
   MAX_FADE_SECONDS,
   MAX_IMAGE_SIZE_PERCENT,
@@ -38,17 +47,20 @@ import {
   MIN_VOLUME_PERCENT,
   type AudioClip,
   type CaptionSegment,
+  type EffectClip,
   type ExportMode,
   type ExportSettings,
   type ImageClip,
   type PlaybackSpeed,
   type ProjectState,
+  type TextAnimationType,
   type TextClip,
   type TimelineClip,
   type TimelineTrack,
   type TrackKind,
   type VideoClip,
   type VideoFileMetadata,
+  type VideoTransition,
 } from './types';
 
 export const MIN_TIMELINE_ZOOM = 15;
@@ -75,6 +87,7 @@ export function createEmptyProject(name = 'Untitled Project'): ProjectState {
     name,
     tracks: [
       { id: 'track-video', kind: 'video', name: 'Video', muted: false, hidden: false, clips: [] },
+      { id: 'track-effects-1', kind: 'effects', name: 'Effects', muted: false, hidden: false, clips: [] },
       { id: 'track-text-1', kind: 'text', name: 'Text', muted: false, hidden: false, clips: [] },
       { id: 'track-image-1', kind: 'image', name: 'Overlay', muted: false, hidden: false, clips: [] },
       { id: 'track-audio-1', kind: 'audio', name: 'Audio', muted: false, hidden: false, clips: [] },
@@ -158,6 +171,7 @@ export function findClipInProject(
 
 export type ClipPropsPatch =
   | Partial<Omit<VideoClip, 'id' | 'type' | 'assetId'>>
+  | Partial<Omit<EffectClip, 'id' | 'type'>>
   | Partial<Omit<TextClip, 'id' | 'type'>>
   | Partial<Omit<ImageClip, 'id' | 'type' | 'assetId' | 'format'>>
   | Partial<Omit<AudioClip, 'id' | 'type' | 'assetId' | 'format'>>;
@@ -166,7 +180,7 @@ export type ProjectAction =
   | { type: 'SET_PROJECT_NAME'; name: string }
   | { type: 'LOAD_VIDEO_PROJECT'; meta: VideoFileMetadata; assetId: string }
   | { type: 'ADD_CLIP'; clip: TimelineClip; trackId?: string; insertIndex?: number; atPlayhead?: boolean }
-  | { type: 'ADD_TRACK_ROW'; kind: 'text' | 'image' }
+  | { type: 'ADD_TRACK_ROW'; kind: 'text' | 'image' | 'effects' }
   | { type: 'MOVE_CLIP'; clipId: string; start: number; targetTrackId?: string }
   | { type: 'REORDER_VIDEO_CLIP'; clipId: string; toIndex: number }
   | { type: 'RESIZE_CLIP'; clipId: string; edge: 'left' | 'right'; time: number }
@@ -175,6 +189,14 @@ export type ProjectAction =
   | { type: 'DELETE_CLIP'; clipId: string }
   | { type: 'REMOVE_ASSET_CLIPS'; assetId: string }
   | { type: 'UPDATE_CLIP_PROPS'; clipId: string; patch: ClipPropsPatch }
+  | { type: 'SET_VIDEO_TRANSITION'; clipId: string; transition: VideoTransition | undefined }
+  | {
+      type: 'APPLY_ANIMATION_TO_ALL_CAPTIONS';
+      animInType: TextAnimationType;
+      animInDuration: number;
+      animOutType: TextAnimationType;
+      animOutDuration: number;
+    }
   | { type: 'TOGGLE_TRACK_MUTE'; trackId: string }
   | { type: 'TOGGLE_TRACK_HIDE'; trackId: string }
   | { type: 'SET_CAPTION_CLIPS'; captions: CaptionSegment[]; timelineOffset?: number }
@@ -195,14 +217,59 @@ function sortClips(clips: TimelineClip[]): TimelineClip[] {
 }
 
 /**
- * Keeps Video track strictly ripple-packed from t=0 with zero gaps and zero overlaps.
+ * Keeps Video track ripple-packed from t=0 with zero gaps and transition overlaps accounted for.
  */
 export function normalizeRippleVideoTrack(clips: TimelineClip[]): TimelineClip[] {
-  let cursor = 0;
-  return clips.map((clip) => {
-    const normalized = { ...clip, start: cursor };
-    cursor += clip.duration;
-    return normalized;
+  const result: VideoClip[] = [];
+  for (let i = 0; i < clips.length; i++) {
+    const raw = clips[i];
+    if (raw.type !== 'video') continue;
+    const isLast = i === clips.length - 1;
+    const transitionOut = !isLast ? normalizeVideoTransition(raw.transitionOut) : undefined;
+    const normalized: VideoClip = {
+      ...raw,
+      start: 0,
+      transitionOut,
+    };
+    if (i > 0) {
+      const prev = result[i - 1];
+      const effOverlap = getEffectiveTransitionDuration(prev, normalized);
+      normalized.start = Number(Math.max(0, prev.start + prev.duration - effOverlap).toFixed(4));
+    }
+    result.push(normalized);
+  }
+  return result;
+}
+
+function syncNonVideoTracksForCutShift(
+  tracks: TimelineTrack[],
+  cutTime: number,
+  delta: number
+): TimelineTrack[] {
+  if (Math.abs(delta) <= 1e-4) return tracks;
+  return tracks.map((t) => {
+    if (t.kind === 'video') return t;
+    const updatedClips = t.clips.map((clip) => {
+      if (clip.start >= cutTime - 0.05) {
+        return {
+          ...clip,
+          start: Math.max(0, Number((clip.start + delta).toFixed(4))),
+        };
+      }
+      if (clip.start < cutTime - 0.05 && clip.start + clip.duration > cutTime + 0.05) {
+        const nextDurRaw = clip.duration + delta;
+        const maxDur =
+          clip.type === 'audio' && !clip.loop
+            ? Math.max(MIN_CLIP_DURATION_SECONDS, clip.sourceDuration - clip.sourceOffset)
+            : Number.POSITIVE_INFINITY;
+        return {
+          ...clip,
+          duration: Math.min(maxDur, Math.max(MIN_CLIP_DURATION_SECONDS, Number(nextDurRaw.toFixed(4)))),
+        };
+      }
+      return clip;
+    });
+    return { ...t, clips: sortClips(updatedClips) };
   });
 }
 
@@ -221,6 +288,8 @@ function getExpectedTrackKind(clip: TimelineClip): TrackKind {
   switch (clip.type) {
     case 'video':
       return 'video';
+    case 'effect':
+      return 'effects';
     case 'image':
       return 'image';
     case 'audio':
@@ -239,11 +308,11 @@ function isTrackCompatibleWithClip(trackKind: TrackKind, clip: TimelineClip): bo
 
 function insertStackableTrack(
   tracks: TimelineTrack[],
-  kind: 'text' | 'image',
+  kind: 'text' | 'image' | 'effects',
   initialClips: TimelineClip[] = []
 ): { tracks: TimelineTrack[]; createdTrack: TimelineTrack } {
   const existingCount = tracks.filter((t) => t.kind === kind).length;
-  const labelBase = kind === 'text' ? 'Text' : 'Overlay';
+  const labelBase = kind === 'text' ? 'Text' : kind === 'image' ? 'Overlay' : 'Effects';
   const createdTrack: TimelineTrack = {
     id: nextProjectId(`track-${kind}`),
     kind,
@@ -253,15 +322,28 @@ function insertStackableTrack(
     clips: sortClips(initialClips),
   };
 
-  // Keep logical DAW/NLE order: video -> captions -> text rows -> image rows -> audio
+  // Keep logical DAW/NLE order: video -> effects -> captions -> text rows -> image rows -> audio
   const nextTracks = [...tracks];
   let insertIdx = nextTracks.length;
-  if (kind === 'text') {
+  if (kind === 'effects') {
+    const lastEffects = nextTracks.map((t) => t.kind).lastIndexOf('effects');
+    const videoIdx = nextTracks.findIndex((t) => t.kind === 'video');
+    insertIdx = lastEffects >= 0 ? lastEffects + 1 : videoIdx >= 0 ? videoIdx + 1 : 0;
+  } else if (kind === 'text') {
     const lastText = nextTracks.map((t) => t.kind).lastIndexOf('text');
     const captionsIdx = nextTracks.findIndex((t) => t.kind === 'captions');
+    const lastEffects = nextTracks.map((t) => t.kind).lastIndexOf('effects');
     const videoIdx = nextTracks.findIndex((t) => t.kind === 'video');
     insertIdx =
-      lastText >= 0 ? lastText + 1 : captionsIdx >= 0 ? captionsIdx + 1 : videoIdx >= 0 ? videoIdx + 1 : 0;
+      lastText >= 0
+        ? lastText + 1
+        : captionsIdx >= 0
+          ? captionsIdx + 1
+          : lastEffects >= 0
+            ? lastEffects + 1
+            : videoIdx >= 0
+              ? videoIdx + 1
+              : 0;
   } else {
     const lastImage = nextTracks.map((t) => t.kind).lastIndexOf('image');
     const audioIdx = nextTracks.findIndex((t) => t.kind === 'audio');
@@ -325,6 +407,33 @@ function sanitizeClipPatch(
     ? { minStart: clip.start, maxEnd: Number.POSITIVE_INFINITY }
     : getClipNeighborBounds(trackClips, clip.id);
 
+  if (clip.type === 'effect') {
+    const p = patch as Partial<EffectClip>;
+    const start =
+      typeof p.start === 'number' && Number.isFinite(p.start)
+        ? Math.max(minStart, p.start)
+        : clip.start;
+    const maxAllowedDur = Math.max(MIN_CLIP_DURATION_SECONDS, maxEnd - start);
+    const duration =
+      typeof p.duration === 'number' && Number.isFinite(p.duration)
+        ? Math.min(maxAllowedDur, Math.max(MIN_CLIP_DURATION_SECONDS, p.duration))
+        : Math.min(maxAllowedDur, clip.duration);
+
+    return {
+      ...clip,
+      effectType:
+        p.effectType && ALLOWED_VIDEO_EFFECTS.includes(p.effectType)
+          ? p.effectType
+          : clip.effectType,
+      start,
+      duration,
+      intensity:
+        typeof p.intensity === 'number' && Number.isFinite(p.intensity)
+          ? clampEffectIntensity(p.intensity)
+          : clip.intensity,
+    };
+  }
+
   if (clip.type === 'text') {
     const p = patch as Partial<TextClip>;
     const start =
@@ -365,6 +474,22 @@ function sanitizeClipPatch(
         typeof p.yPercent === 'number' && Number.isFinite(p.yPercent)
           ? Math.max(5, Math.min(95, p.yPercent))
           : clip.yPercent,
+      animInType:
+        p.animInType && ALLOWED_TEXT_ANIMATIONS.includes(p.animInType)
+          ? p.animInType
+          : (clip.animInType ?? 'none'),
+      animInDuration:
+        typeof p.animInDuration === 'number'
+          ? clampTextAnimationDuration(p.animInDuration)
+          : (clip.animInDuration ?? DEFAULT_TEXT_ANIMATION_SECONDS),
+      animOutType:
+        p.animOutType && ALLOWED_TEXT_ANIMATIONS.includes(p.animOutType)
+          ? p.animOutType
+          : (clip.animOutType ?? 'none'),
+      animOutDuration:
+        typeof p.animOutDuration === 'number'
+          ? clampTextAnimationDuration(p.animOutDuration)
+          : (clip.animOutDuration ?? DEFAULT_TEXT_ANIMATION_SECONDS),
     };
   }
 
@@ -508,6 +633,10 @@ function sanitizeClipPatch(
       typeof p.fadeOutSeconds === 'number' && Number.isFinite(p.fadeOutSeconds)
         ? Math.max(0, Math.min(MAX_FADE_SECONDS, p.fadeOutSeconds))
         : clip.fadeOutSeconds,
+    transitionOut:
+      'transitionOut' in p
+        ? normalizeVideoTransition(p.transitionOut)
+        : clip.transitionOut,
   };
 }
 
@@ -635,8 +764,8 @@ export function projectReducer(
         ? project.tracks.find((t) => t.id === action.trackId && isTrackCompatibleWithClip(t.kind, incoming))
         : undefined;
 
-      // For text or image clips, look for a non-overlapping row or stack a new row
-      if (targetKind === 'text' || targetKind === 'image') {
+      // For text, image, or effects clips, look for a non-overlapping row or stack a new row
+      if (targetKind === 'text' || targetKind === 'image' || targetKind === 'effects') {
         const compatibleTracks = requestedTrack
           ? [requestedTrack, ...project.tracks.filter((t) => t.kind === targetKind && t.id !== requestedTrack.id)]
           : project.tracks.filter((t) => t.kind === targetKind);
@@ -923,6 +1052,7 @@ export function projectReducer(
           id: nextProjectId('vid'),
           duration: leftDuration,
           fadeOutSeconds: 0,
+          transitionOut: undefined,
         };
         right = {
           ...clip,
@@ -931,6 +1061,7 @@ export function projectReducer(
           duration: rightDuration,
           sourceOffset: clip.sourceOffset + leftDuration * clip.speed,
           fadeInSeconds: 0,
+          transitionOut: clip.transitionOut,
         };
       } else if (clip.type === 'audio') {
         left = {
@@ -947,6 +1078,9 @@ export function projectReducer(
           sourceOffset: clip.loop ? clip.sourceOffset : clip.sourceOffset + leftDuration,
           fadeInSeconds: 0,
         };
+      } else if (clip.type === 'effect') {
+        left = { ...clip, id: nextProjectId('efx'), duration: leftDuration };
+        right = { ...clip, id: nextProjectId('efx'), start: splitTime, duration: rightDuration };
       } else if (clip.type === 'image') {
         left = { ...clip, id: nextProjectId('img'), duration: leftDuration };
         right = { ...clip, id: nextProjectId('img'), start: splitTime, duration: rightDuration };
@@ -986,10 +1120,11 @@ export function projectReducer(
         if (track.clips.length >= MAX_VIDEO_TRACK_CLIPS) {
           return state;
         }
-        const copy: TimelineClip = {
-          ...clip,
+        const copy: VideoClip = {
+          ...(clip as VideoClip),
           id: nextProjectId('vid'),
           start: clip.start + clip.duration,
+          transitionOut: undefined,
         };
         const idx = track.clips.findIndex((c) => c.id === clip.id);
         const next = [...track.clips];
@@ -1006,7 +1141,9 @@ export function projectReducer(
           ? 'aud'
           : clip.type === 'image'
             ? 'img'
-            : 'txt';
+            : clip.type === 'effect'
+              ? 'efx'
+              : 'txt';
       const preferredStart = clip.start + clip.duration;
 
       if (!hasOverlapOnTrack(track.clips, preferredStart, clip.duration)) {
@@ -1021,7 +1158,7 @@ export function projectReducer(
         return applyProjectMutation(state, { ...project, tracks: nextTracks }, copy.id);
       }
 
-      if (track.kind === 'text' || track.kind === 'image') {
+      if (track.kind === 'text' || track.kind === 'image' || track.kind === 'effects') {
         const stackKind = track.kind;
         const otherRow = project.tracks.find(
           (t) =>
@@ -1108,6 +1245,62 @@ export function projectReducer(
         return {
           ...t,
           clips: isRippleVideo ? normalizeRippleVideoTrack(mapped) : sortClips(mapped),
+        };
+      });
+      return applyProjectMutation(state, { ...project, tracks: nextTracks });
+    }
+
+    case 'SET_VIDEO_TRANSITION': {
+      const videoTrack = project.tracks.find((t) => t.kind === 'video');
+      if (!videoTrack) return state;
+      const idx = videoTrack.clips.findIndex((c) => c.id === action.clipId);
+      if (idx < 0 || idx >= videoTrack.clips.length - 1) return state;
+
+      const oldNextStart = videoTrack.clips[idx + 1].start;
+      const normalizedTr = normalizeVideoTransition(action.transition);
+      const updatedRaw = videoTrack.clips.map((c, i) =>
+        i === idx && c.type === 'video' ? { ...c, transitionOut: normalizedTr } : c
+      );
+      const rippled = normalizeRippleVideoTrack(updatedRaw);
+      const newNextStart = rippled[idx + 1].start;
+      const delta = newNextStart - oldNextStart;
+
+      let nextTracks = project.tracks.map((t) =>
+        t.id === videoTrack.id ? { ...t, clips: rippled } : t
+      );
+      nextTracks = syncNonVideoTracksForCutShift(nextTracks, oldNextStart, delta);
+
+      const newProjectDur = getProjectDuration({ ...project, tracks: nextTracks });
+      const nextPlayhead = Math.min(state.playhead, Math.max(0, newProjectDur));
+      const mutated = applyProjectMutation(state, { ...project, tracks: nextTracks });
+      return { ...mutated, playhead: nextPlayhead };
+    }
+
+    case 'APPLY_ANIMATION_TO_ALL_CAPTIONS': {
+      const animInType = ALLOWED_TEXT_ANIMATIONS.includes(action.animInType)
+        ? action.animInType
+        : 'none';
+      const animOutType = ALLOWED_TEXT_ANIMATIONS.includes(action.animOutType)
+        ? action.animOutType
+        : 'none';
+      const animInDuration = clampTextAnimationDuration(action.animInDuration);
+      const animOutDuration = clampTextAnimationDuration(action.animOutDuration);
+
+      const nextTracks = project.tracks.map((t) => {
+        if (t.kind !== 'captions') return t;
+        return {
+          ...t,
+          clips: t.clips.map((c) =>
+            c.type === 'text'
+              ? {
+                  ...c,
+                  animInType,
+                  animInDuration,
+                  animOutType,
+                  animOutDuration,
+                }
+              : c
+          ),
         };
       });
       return applyProjectMutation(state, { ...project, tracks: nextTracks });

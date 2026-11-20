@@ -110,7 +110,7 @@ export interface ColorFilterConfig {
 export type ExportResolution = 'original' | '1080p' | '720p' | '480p';
 export type ExportCanvasPreset = 'original' | '1080p-16:9' | '720p-16:9' | '9:16' | '1:1';
 export type CanvasFitMode = 'fit' | 'fill';
-export type ExportQuality = 'small' | 'balanced' | 'high';
+export type ExportQuality = 'draft' | 'small' | 'balanced' | 'high';
 
 export interface ExportSettings {
   resolution: ExportResolution;
@@ -153,8 +153,45 @@ export interface EditToolsConfig {
 // Timeline Project Data Model (CapCut/Premiere-style NLE)
 // ---------------------------------------------------------------------------
 
-export type TrackKind = 'video' | 'captions' | 'text' | 'image' | 'audio';
+export type TrackKind = 'video' | 'effects' | 'captions' | 'text' | 'image' | 'audio';
 export type TextClipAlign = 'left' | 'center' | 'right';
+
+export type TextAnimationType =
+  | 'none'
+  | 'fade'
+  | 'slide-up'
+  | 'slide-down'
+  | 'slide-left'
+  | 'slide-right'
+  | 'pop';
+
+export type VideoEffectType =
+  | 'blur'
+  | 'sharpen'
+  | 'vignette'
+  | 'film-grain'
+  | 'glitch-rgb'
+  | 'camera-shake'
+  | 'bw'
+  | 'sepia'
+  | 'invert'
+  | 'pixelate'
+  | 'mirror'
+  | 'flash';
+
+export type VideoTransitionType =
+  | 'none'
+  | 'fade'
+  | 'dissolve'
+  | 'wipe-left'
+  | 'wipe-right'
+  | 'slide-left'
+  | 'slide-right';
+
+export interface VideoTransition {
+  type: VideoTransitionType;
+  duration: number;
+}
 
 export interface VideoClip {
   id: string;
@@ -174,6 +211,18 @@ export interface VideoClip {
   colorFilter: ColorFilterConfig;
   fadeInSeconds: number;
   fadeOutSeconds: number;
+  transitionOut?: VideoTransition;
+}
+
+export interface EffectClip {
+  id: string;
+  type: 'effect';
+  name: string;
+  effectType: VideoEffectType;
+  start: number;
+  duration: number;
+  sourceOffset: number;
+  intensity: number; // 0 .. 100
 }
 
 export interface TextClip {
@@ -190,6 +239,10 @@ export interface TextClip {
   align: TextClipAlign;
   xPercent: number; // 0 .. 100
   yPercent: number; // 0 .. 100
+  animInType?: TextAnimationType;
+  animInDuration?: number;
+  animOutType?: TextAnimationType;
+  animOutDuration?: number;
 }
 
 export interface ImageClip {
@@ -224,7 +277,7 @@ export interface AudioClip {
   fadeOutSeconds: number;
 }
 
-export type TimelineClip = VideoClip | TextClip | ImageClip | AudioClip;
+export type TimelineClip = VideoClip | EffectClip | TextClip | ImageClip | AudioClip;
 
 export interface TimelineTrack {
   id: string;
@@ -316,10 +369,28 @@ export const MIN_TRIM_DURATION_SECONDS = 0.5;
 export const MIN_CLIP_DURATION_SECONDS = 0.2;
 export const DEFAULT_TEXT_CLIP_DURATION = 3;
 export const DEFAULT_IMAGE_CLIP_DURATION = 3;
+export const DEFAULT_EFFECT_CLIP_DURATION = 3;
 export const DEFAULT_EXPORT_FPS = 30;
+export const DRAFT_EXPORT_FPS = 24;
+export const DRAFT_MAX_SHORT_SIDE = 480;
 export const TRIM_BOUNDS_TOLERANCE_SECONDS = 0.01;
 export const SLOW_REENCODE_WARNING_SECONDS = 120; // 2 minutes
+export const HEAVY_EFFECTS_WARNING_SECONDS = 60; // 1 minute
+export const HEAVY_EFFECTS_MIN_COUNT = 3;
 export const MIN_FONT_SIZE_BYTES = 1024; // 1 KB
+
+export const MIN_TEXT_ANIMATION_SECONDS = 0.1;
+export const MAX_TEXT_ANIMATION_SECONDS = 2;
+export const DEFAULT_TEXT_ANIMATION_SECONDS = 0.5;
+export const TEXT_SLIDE_HORIZONTAL_PCT = 20;
+export const TEXT_SLIDE_VERTICAL_PCT = 12;
+
+export const MIN_EFFECT_INTENSITY = 0;
+export const MAX_EFFECT_INTENSITY = 100;
+
+export const MIN_TRANSITION_DURATION_SECONDS = 0.2;
+export const MAX_TRANSITION_DURATION_SECONDS = 2;
+export const DEFAULT_TRANSITION_DURATION_SECONDS = 0.6;
 
 export const MAX_TEXT_OVERLAYS = 5;
 export const MAX_TEXT_OVERLAY_LENGTH = 80;
@@ -351,6 +422,38 @@ export const ALLOWED_OVERLAY_POSITIONS: readonly TextOverlayPosition[] = [
 export const ALLOWED_OVERLAY_SIZES: readonly TextOverlaySize[] = ['small', 'medium', 'large'];
 export const ALLOWED_OVERLAY_COLORS: readonly TextOverlayColor[] = ['white', 'yellow', 'black'];
 export const ALLOWED_TEXT_ALIGNS: readonly TextClipAlign[] = ['left', 'center', 'right'];
+export const ALLOWED_TEXT_ANIMATIONS: readonly TextAnimationType[] = [
+  'none',
+  'fade',
+  'slide-up',
+  'slide-down',
+  'slide-left',
+  'slide-right',
+  'pop',
+];
+export const ALLOWED_VIDEO_EFFECTS: readonly VideoEffectType[] = [
+  'blur',
+  'sharpen',
+  'vignette',
+  'film-grain',
+  'glitch-rgb',
+  'camera-shake',
+  'bw',
+  'sepia',
+  'invert',
+  'pixelate',
+  'mirror',
+  'flash',
+];
+export const ALLOWED_VIDEO_TRANSITIONS: readonly VideoTransitionType[] = [
+  'none',
+  'fade',
+  'dissolve',
+  'wipe-left',
+  'wipe-right',
+  'slide-left',
+  'slide-right',
+];
 export const ALLOWED_IMAGE_POSITIONS: readonly ImageOverlayPosition[] = [
   'top-left',
   'top-right',
@@ -373,7 +476,12 @@ export const ALLOWED_CANVAS_PRESETS: readonly ExportCanvasPreset[] = [
   '1:1',
 ];
 export const ALLOWED_CANVAS_FIT_MODES: readonly CanvasFitMode[] = ['fit', 'fill'];
-export const ALLOWED_EXPORT_QUALITIES: readonly ExportQuality[] = ['small', 'balanced', 'high'];
+export const ALLOWED_EXPORT_QUALITIES: readonly ExportQuality[] = [
+  'draft',
+  'small',
+  'balanced',
+  'high',
+];
 
 export const INTERNAL_INPUT_FILENAME = 'input.mp4';
 export const INTERNAL_OUTPUT_FILENAME = 'output.mp4';

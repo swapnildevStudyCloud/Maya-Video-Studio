@@ -9,18 +9,23 @@ import {
   Volume2,
   VolumeX,
 } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState, type DragEvent, type PointerEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent } from 'react';
 import {
+  evaluateTextAnimationPreview,
   formatTimecode,
+  getEffectiveTransitionDuration,
   getProjectDuration,
   resolveProjectCanvasDimensions,
+  VIDEO_EFFECT_META_MAP,
   type ClipPropsPatch,
   type CropAspectRatio,
+  type EffectClip,
   type ImageClip,
   type MediaAsset,
   type ProjectState,
   type TextClip,
   type VideoClip,
+  type VideoTransitionType,
 } from '../lib/editor';
 
 interface PreviewCanvasProps {
@@ -128,8 +133,40 @@ export function PreviewCanvas({
     return videoTrack.clips.filter((c): c is VideoClip => c.type === 'video');
   }, [videoTrack]);
 
+  const activeTransitionOverlap = useMemo<{
+    prevClip: VideoClip;
+    nextClip: VideoClip;
+    type: VideoTransitionType;
+    progress: number;
+  } | null>(() => {
+    if (!videoTrack || videoTrack.hidden || videoClips.length < 2) return null;
+    for (let i = 0; i < videoClips.length - 1; i++) {
+      const prevClip = videoClips[i];
+      const nextClip = videoClips[i + 1];
+      const effDur = getEffectiveTransitionDuration(prevClip, nextClip);
+      if (effDur <= 0 || !prevClip.transitionOut) continue;
+      const overlapStart = nextClip.start;
+      const overlapEnd = prevClip.start + prevClip.duration;
+      if (playhead >= overlapStart && playhead <= overlapEnd && overlapEnd > overlapStart) {
+        const progress = Math.max(0, Math.min(1, (playhead - overlapStart) / effDur));
+        return {
+          prevClip,
+          nextClip,
+          type: prevClip.transitionOut.type,
+          progress,
+        };
+      }
+    }
+    return null;
+  }, [playhead, videoClips, videoTrack]);
+
   const activeVideoClip = useMemo<VideoClip | null>(() => {
     if (!videoTrack || videoTrack.hidden || videoClips.length === 0) return null;
+    if (activeTransitionOverlap) {
+      return activeTransitionOverlap.progress < 0.5
+        ? activeTransitionOverlap.prevClip
+        : activeTransitionOverlap.nextClip;
+    }
     for (let i = 0; i < videoClips.length; i++) {
       const c = videoClips[i];
       const isLast = i === videoClips.length - 1;
@@ -138,7 +175,7 @@ export function PreviewCanvas({
       }
     }
     return null;
-  }, [playhead, videoClips, videoTrack]);
+  }, [activeTransitionOverlap, playhead, videoClips, videoTrack]);
 
   const canvasDims = useMemo(
     () =>
@@ -152,6 +189,24 @@ export function PreviewCanvas({
 
   const stageAspectRatio = `${canvasDims.width} / ${canvasDims.height}`;
   const canvasFit = project.exportSettings.canvasFit ?? 'fit';
+
+  const activeEffectClips = useMemo<EffectClip[]>(() => {
+    const list: EffectClip[] = [];
+    for (const t of project.tracks) {
+      if (t.kind !== 'effects' || t.hidden) continue;
+      for (const c of t.clips) {
+        if (
+          c.type === 'effect' &&
+          c.intensity > 0 &&
+          playhead >= c.start &&
+          playhead <= c.start + c.duration
+        ) {
+          list.push(c);
+        }
+      }
+    }
+    return list;
+  }, [playhead, project.tracks]);
 
   const activeImageClips = useMemo<ImageClip[]>(() => {
     const list: ImageClip[] = [];
@@ -242,11 +297,26 @@ export function PreviewCanvas({
     return () => cancelAnimationFrame(rafId);
   }, [isPlaying, onPlayheadChange, onTogglePlay, projectDuration]);
 
-  // Sync per-asset <video> elements so cuts between clips switch cleanly
+  // Sync per-asset <video> elements so cuts and cross-asset transitions switch cleanly
   useEffect(() => {
     for (const [assetId, video] of videoRefs.current.entries()) {
-      const isCurrentAsset = activeVideoClip?.assetId === assetId;
-      if (!isCurrentAsset || !activeVideoClip) {
+      let matchingClip: VideoClip | null = null;
+      if (activeTransitionOverlap) {
+        if (activeTransitionOverlap.prevClip.assetId === assetId) {
+          matchingClip = activeTransitionOverlap.prevClip;
+        }
+        if (activeTransitionOverlap.nextClip.assetId === assetId) {
+          matchingClip =
+            activeTransitionOverlap.prevClip.assetId === assetId &&
+            activeTransitionOverlap.progress < 0.5
+              ? activeTransitionOverlap.prevClip
+              : activeTransitionOverlap.nextClip;
+        }
+      } else if (activeVideoClip?.assetId === assetId) {
+        matchingClip = activeVideoClip;
+      }
+
+      if (!matchingClip) {
         if (!video.paused) video.pause();
         continue;
       }
@@ -254,21 +324,21 @@ export function PreviewCanvas({
       const expectedTime = Math.max(
         0,
         Math.min(
-          activeVideoClip.sourceDuration,
-          activeVideoClip.sourceOffset + (playhead - activeVideoClip.start) * activeVideoClip.speed
+          matchingClip.sourceDuration,
+          matchingClip.sourceOffset + (playhead - matchingClip.start) * matchingClip.speed
         )
       );
 
       if (Math.abs(video.currentTime - expectedTime) > (isPlaying ? 0.16 : 0.03)) {
         video.currentTime = expectedTime;
       }
-      video.playbackRate = activeVideoClip.speed;
+      video.playbackRate = matchingClip.speed;
       video.muted =
         isPreviewMuted ||
         Boolean(videoTrack?.muted) ||
-        activeVideoClip.muted ||
-        activeVideoClip.volumePercent === 0;
-      video.volume = Math.min(1, Math.max(0, activeVideoClip.volumePercent / 100));
+        matchingClip.muted ||
+        matchingClip.volumePercent === 0;
+      video.volume = Math.min(1, Math.max(0, matchingClip.volumePercent / 100));
 
       if (isPlaying && video.paused) {
         void video.play().catch(() => {});
@@ -276,7 +346,15 @@ export function PreviewCanvas({
         video.pause();
       }
     }
-  }, [activeVideoClip, isPlaying, isPreviewMuted, playhead, videoAssets.length, videoTrack?.muted]);
+  }, [
+    activeTransitionOverlap,
+    activeVideoClip,
+    isPlaying,
+    isPreviewMuted,
+    playhead,
+    videoAssets.length,
+    videoTrack?.muted,
+  ]);
 
   // Sync Audio track <audio> elements during playback
   useEffect(() => {
@@ -372,12 +450,65 @@ export function PreviewCanvas({
   const cropGuideClass = activeVideoClip ? getCropGuideClass(activeVideoClip.cropAspect) : null;
   const isSideways =
     activeVideoClip?.rotationDegrees === 90 || activeVideoClip?.rotationDegrees === 270;
+
+  let hasApproximatePreview = Boolean(activeTransitionOverlap);
+  let mirrorCount = 0;
+  let vignetteAlpha = 0;
+  let flashAlpha = 0;
+  const effectFilters: string[] = [];
+
+  for (const ef of activeEffectClips) {
+    const meta = VIDEO_EFFECT_META_MAP[ef.effectType];
+    if (!meta.hasExactCssPreview) {
+      hasApproximatePreview = true;
+    }
+    const k = Math.max(0, Math.min(1, ef.intensity / 100));
+    switch (ef.effectType) {
+      case 'blur':
+        effectFilters.push(`blur(${(k * 14).toFixed(1)}px)`);
+        break;
+      case 'bw':
+        effectFilters.push(`grayscale(${k.toFixed(2)})`);
+        break;
+      case 'sepia':
+        effectFilters.push(`sepia(${k.toFixed(2)})`);
+        break;
+      case 'invert':
+        effectFilters.push(`invert(${k.toFixed(2)})`);
+        break;
+      case 'mirror':
+        mirrorCount += 1;
+        break;
+      case 'vignette':
+        vignetteAlpha = Math.max(vignetteAlpha, 0.25 + k * 0.65);
+        break;
+      case 'flash': {
+        const half = Math.max(0.001, ef.duration / 2);
+        const rel = playhead - ef.start;
+        const tri = rel <= half ? rel / half : (ef.duration - rel) / half;
+        flashAlpha = Math.max(flashAlpha, Math.max(0, Math.min(1, tri)) * k);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  const combinedFlip =
+    (activeVideoClip?.flipHorizontal ? -1 : 1) * (mirrorCount % 2 === 1 ? -1 : 1);
   const videoTransform = activeVideoClip
-    ? `rotate(${activeVideoClip.rotationDegrees}deg) scaleX(${
-        activeVideoClip.flipHorizontal ? -1 : 1
-      })${isSideways ? ' scale(0.5625)' : ''}`
-    : undefined;
-  const videoCssFilter = getCssColorFilter(activeVideoClip);
+    ? `rotate(${activeVideoClip.rotationDegrees}deg) scaleX(${combinedFlip})${
+        isSideways ? ' scale(0.5625)' : ''
+      }`
+    : mirrorCount % 2 === 1
+      ? 'scaleX(-1)'
+      : undefined;
+
+  const baseFilter = getCssColorFilter(activeVideoClip);
+  const combinedFilterParts = [baseFilter, ...effectFilters].filter(Boolean);
+  const videoCssFilter =
+    combinedFilterParts.length > 0 ? combinedFilterParts.join(' ') : undefined;
+
   const hasPlayableContent = videoAssets.length > 0 || projectDuration > 0;
 
   return (
@@ -448,9 +579,77 @@ export function PreviewCanvas({
             style={{ aspectRatio: stageAspectRatio }}
             className="relative flex h-full max-h-full max-w-full items-center justify-center overflow-hidden rounded-lg border border-[#232A38] bg-black"
           >
-            {/* Render one <video> element per imported video asset for seamless clip cuts */}
+            {/* Render one <video> element per imported video asset for seamless clip cuts and transitions */}
             {videoAssets.map((asset) => {
-              const isActive = activeVideoClip?.assetId === asset.id;
+              let style: CSSProperties = {
+                opacity: 0,
+                pointerEvents: 'none',
+              };
+
+              if (activeTransitionOverlap) {
+                const { prevClip, nextClip, type, progress } = activeTransitionOverlap;
+                const isPrev = prevClip.assetId === asset.id;
+                const isNext = nextClip.assetId === asset.id;
+
+                if (isPrev && isNext) {
+                  // Same-asset cut approximation
+                  const dipOpacity =
+                    type === 'fade' || type === 'dissolve'
+                      ? Math.max(0.25, 1 - Math.sin(progress * Math.PI) * 0.65)
+                      : 1;
+                  style = {
+                    transform: videoTransform,
+                    filter: videoCssFilter,
+                    opacity: dipOpacity,
+                    pointerEvents: 'auto',
+                  };
+                } else if (isPrev) {
+                  let extraTransform = '';
+                  if (type === 'slide-left') {
+                    extraTransform = ` translateX(${(-progress * 100).toFixed(2)}%)`;
+                  } else if (type === 'slide-right') {
+                    extraTransform = ` translateX(${(progress * 100).toFixed(2)}%)`;
+                  }
+                  style = {
+                    transform: `${videoTransform ?? ''}${extraTransform}`.trim() || undefined,
+                    filter: videoCssFilter,
+                    opacity: type === 'fade' || type === 'dissolve' ? 1 - progress : 1,
+                    zIndex: 1,
+                    pointerEvents: 'auto',
+                  };
+                } else if (isNext) {
+                  let clipPath: string | undefined;
+                  let extraTransform = '';
+                  let opacity = 1;
+                  if (type === 'fade' || type === 'dissolve') {
+                    opacity = progress;
+                  } else if (type === 'wipe-left') {
+                    clipPath = `inset(0 0 0 ${((1 - progress) * 100).toFixed(2)}%)`;
+                  } else if (type === 'wipe-right') {
+                    clipPath = `inset(0 ${((1 - progress) * 100).toFixed(2)}% 0 0)`;
+                  } else if (type === 'slide-left') {
+                    extraTransform = ` translateX(${((1 - progress) * 100).toFixed(2)}%)`;
+                  } else if (type === 'slide-right') {
+                    extraTransform = ` translateX(${(-(1 - progress) * 100).toFixed(2)}%)`;
+                  }
+                  style = {
+                    transform: `${videoTransform ?? ''}${extraTransform}`.trim() || undefined,
+                    filter: videoCssFilter,
+                    opacity,
+                    clipPath,
+                    zIndex: 2,
+                    pointerEvents: 'auto',
+                  };
+                }
+              } else if (activeVideoClip?.assetId === asset.id) {
+                style = {
+                  transform: videoTransform,
+                  filter: videoCssFilter,
+                  opacity: 1,
+                  pointerEvents: 'auto',
+                };
+              }
+
               return (
                 <video
                   key={asset.id}
@@ -465,12 +664,7 @@ export function PreviewCanvas({
                     e.stopPropagation();
                     onTogglePlay();
                   }}
-                  style={{
-                    transform: isActive ? videoTransform : undefined,
-                    filter: isActive ? videoCssFilter : undefined,
-                    opacity: isActive ? 1 : 0,
-                    pointerEvents: isActive ? 'auto' : 'none',
-                  }}
+                  style={style}
                   className={`absolute inset-0 h-full w-full cursor-pointer ${
                     canvasFit === 'fill' ? 'object-cover' : 'object-contain'
                   }`}
@@ -478,9 +672,27 @@ export function PreviewCanvas({
               );
             })}
 
+            {/* Vignette & Flash VFX overlays */}
+            {vignetteAlpha > 0 && (
+              <div
+                className="pointer-events-none absolute inset-0 z-10"
+                style={{
+                  background: `radial-gradient(circle, transparent 42%, rgba(0,0,0,${vignetteAlpha.toFixed(
+                    2
+                  )}) 100%)`,
+                }}
+              />
+            )}
+            {flashAlpha > 0.01 && (
+              <div
+                className="pointer-events-none absolute inset-0 z-10 bg-white"
+                style={{ opacity: flashAlpha }}
+              />
+            )}
+
             {/* Crop aspect guide */}
             {cropGuideClass && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
                 <div
                   className={`${cropGuideClass} border border-dashed border-blue-400/90 shadow-[0_0_0_9999px_rgba(0,0,0,0.45)]`}
                 />
@@ -549,32 +761,49 @@ export function PreviewCanvas({
                   : '[text-shadow:0_1px_4px_rgba(0,0,0,0.85)]';
               const translateX =
                 txt.align === 'left' ? '0%' : txt.align === 'right' ? '-100%' : '-50%';
+              const anim = evaluateTextAnimationPreview(txt, playhead);
 
               return (
                 <div
                   key={txt.id}
-                  role="button"
-                  tabIndex={0}
-                  onPointerDown={(e) => startOverlayDrag(e, txt.id, txt.xPercent, txt.yPercent)}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onSelectClip(txt.id);
-                  }}
+                  className="pointer-events-none absolute inset-0 z-20"
                   style={{
-                    left: `${txt.xPercent}%`,
-                    top: `${txt.yPercent}%`,
-                    transform: `translate(${translateX}, -50%)`,
-                    textAlign: txt.align,
+                    transform: `translate(${anim.offsetXPct.toFixed(3)}%, ${anim.offsetYPct.toFixed(
+                      3
+                    )}%)`,
                   }}
-                  title="Drag to move text on preview"
-                  className={`absolute max-w-[85%] cursor-move leading-snug font-semibold whitespace-pre-wrap select-none ${sizeClass} ${colorClass} ${boxClass} ${
-                    isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-black/40' : ''
-                  }`}
                 >
-                  {txt.text}
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onPointerDown={(e) => startOverlayDrag(e, txt.id, txt.xPercent, txt.yPercent)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelectClip(txt.id);
+                    }}
+                    style={{
+                      left: `${txt.xPercent}%`,
+                      top: `${txt.yPercent}%`,
+                      opacity: anim.opacity,
+                      transform: `translate(${translateX}, -50%) scale(${anim.scale.toFixed(3)})`,
+                      textAlign: txt.align,
+                    }}
+                    title="Drag to move text on preview"
+                    className={`pointer-events-auto absolute max-w-[85%] cursor-move leading-snug font-semibold whitespace-pre-wrap select-none ${sizeClass} ${colorClass} ${boxClass} ${
+                      isSelected ? 'ring-2 ring-blue-500 ring-offset-2 ring-offset-black/40' : ''
+                    }`}
+                  >
+                    {txt.text}
+                  </div>
                 </div>
               );
             })}
+
+            {hasApproximatePreview && (
+              <div className="pointer-events-none absolute top-2.5 right-2.5 z-30 rounded border border-amber-400/40 bg-black/75 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+                Approximate preview · applied on export
+              </div>
+            )}
           </div>
         )}
       </div>

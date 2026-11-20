@@ -1,4 +1,5 @@
 import {
+  ArrowLeftRight,
   Captions,
   Copy,
   Eye,
@@ -9,6 +10,7 @@ import {
   Music,
   Plus,
   Scissors,
+  Sparkles,
   Trash2,
   Type,
   Volume2,
@@ -28,12 +30,14 @@ import {
 } from 'react';
 import {
   formatTimecode,
+  getEffectiveTransitionDuration,
   getProjectDuration,
   getSnapTargets,
   MAX_TIMELINE_ZOOM,
   MIN_TIMELINE_ZOOM,
   snapClipMoveStart,
   snapTime,
+  VIDEO_TRANSITION_META,
   type MediaAsset,
   type ProjectState,
   type TimelineClip,
@@ -46,10 +50,12 @@ interface TimelineProps {
   assets: Map<string, MediaAsset>;
   playhead: number;
   selectedClipId: string | null;
+  selectedTransitionClipId: string | null;
   zoomPxPerSec: number;
   snapEnabled: boolean;
   disabled: boolean;
   onSelectClip: (clipId: string | null) => void;
+  onSelectTransition: (clipId: string | null) => void;
   onPlayheadChange: (time: number) => void;
   onZoomChange: (zoom: number) => void;
   onToggleSnap: () => void;
@@ -60,7 +66,7 @@ interface TimelineProps {
   onSplitAtPlayhead: () => void;
   onDuplicateSelected: () => void;
   onDeleteSelected: () => void;
-  onAddTrackRow: (kind: 'text' | 'image') => void;
+  onAddTrackRow: (kind: 'text' | 'image' | 'effects') => void;
   onToggleTrackMute: (trackId: string) => void;
   onToggleTrackHide: (trackId: string) => void;
   onDropAssetOnTimeline: (assetId: string, dropTime: number, targetTrackId?: string) => void;
@@ -81,6 +87,8 @@ function TrackIcon({ kind }: { kind: TrackKind }) {
   switch (kind) {
     case 'video':
       return <Film className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />;
+    case 'effects':
+      return <Sparkles className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />;
     case 'captions':
       return <Captions className="h-3.5 w-3.5 text-slate-300" aria-hidden="true" />;
     case 'text':
@@ -97,10 +105,12 @@ export function Timeline({
   assets,
   playhead,
   selectedClipId,
+  selectedTransitionClipId,
   zoomPxPerSec,
   snapEnabled,
   disabled,
   onSelectClip,
+  onSelectTransition,
   onPlayheadChange,
   onZoomChange,
   onToggleSnap,
@@ -211,10 +221,12 @@ export function Timeline({
           : { start: rawStart, snappedTo: null };
         setSnapGuideTime(snapped.snappedTo);
 
-        // Allow dragging vertically across stacked rows of text or image
+        // Allow dragging vertically across stacked rows of text, image, or effects
         let targetTrackId: string | undefined;
         if (
-          (dragState.trackKind === 'text' || dragState.trackKind === 'image') &&
+          (dragState.trackKind === 'text' ||
+            dragState.trackKind === 'image' ||
+            dragState.trackKind === 'effects') &&
           trackRowsRef.current
         ) {
           const rowsRect = trackRowsRef.current.getBoundingClientRect();
@@ -468,6 +480,17 @@ export function Timeline({
           <button
             type="button"
             disabled={disabled}
+            onClick={() => onAddTrackRow('effects')}
+            title="Add stacked effect row"
+            className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#232A38] bg-[#131720] px-2 text-[11px] text-slate-300 hover:border-[#3A455C] disabled:opacity-40"
+          >
+            <Plus className="h-3 w-3" aria-hidden="true" />
+            <span>Effect row</span>
+          </button>
+
+          <button
+            type="button"
+            disabled={disabled}
             onClick={() => onAddTrackRow('text')}
             title="Add stacked text row"
             className="inline-flex h-7 items-center gap-1 rounded-lg border border-[#232A38] bg-[#131720] px-2 text-[11px] text-slate-300 hover:border-[#3A455C] disabled:opacity-40"
@@ -553,6 +576,7 @@ export function Timeline({
           onClick={(e: MouseEvent<HTMLDivElement>) => {
             if (e.target === e.currentTarget) {
               onSelectClip(null);
+              onSelectTransition(null);
             }
           }}
           className="relative flex-1 overflow-x-auto bg-[#0B0D11]"
@@ -592,7 +616,10 @@ export function Timeline({
                     }}
                     onDrop={(e) => handleTrackDrop(e, track)}
                     onClick={(e) => {
-                      if (e.target === e.currentTarget) onSelectClip(null);
+                      if (e.target === e.currentTarget) {
+                        onSelectClip(null);
+                        onSelectTransition(null);
+                      }
                     }}
                     className={`relative border-b border-[#232A38] transition-colors ${
                       isDimmed ? 'opacity-45' : ''
@@ -606,6 +633,7 @@ export function Timeline({
                         clip.type === 'audio' ? assets.get(clip.assetId) : undefined;
                       const videoAsset =
                         clip.type === 'video' ? assets.get(clip.assetId) : undefined;
+                      const isEffect = clip.type === 'effect';
 
                       return (
                         <div
@@ -625,9 +653,13 @@ export function Timeline({
                             });
                           }}
                           className={`group absolute top-1 bottom-1 flex cursor-grab items-center overflow-hidden rounded-lg border px-2 transition-colors active:cursor-grabbing ${
-                            isSelected
-                              ? 'border-blue-500 bg-[#1B2A44] text-white'
-                              : 'border-[#2E384D] bg-[#181E2B] text-slate-200 hover:border-[#475573]'
+                            isEffect
+                              ? isSelected
+                                ? 'border-amber-400 bg-amber-500/25 text-white'
+                                : 'border-amber-500/45 bg-amber-500/12 text-amber-100 hover:border-amber-400/80'
+                              : isSelected
+                                ? 'border-blue-500 bg-[#1B2A44] text-white'
+                                : 'border-[#2E384D] bg-[#181E2B] text-slate-200 hover:border-[#475573]'
                           }`}
                         >
                           {/* Left resize edge */}
@@ -692,6 +724,17 @@ export function Timeline({
                             <span className="pointer-events-none truncate text-[11px] font-medium">
                               {clip.text || 'Text'}
                             </span>
+                          ) : clip.type === 'effect' ? (
+                            <div className="pointer-events-none flex min-w-0 flex-1 items-center justify-between gap-1.5">
+                              <span className="truncate text-[11px] font-medium">
+                                {clip.name}
+                              </span>
+                              {widthPx > 64 && (
+                                <span className="shrink-0 font-mono text-[10px] text-amber-200/80 tabular-nums">
+                                  {clip.intensity}%
+                                </span>
+                              )}
+                            </div>
                           ) : (
                             <span className="pointer-events-none truncate text-[11px] font-medium">
                               {clip.name}
@@ -720,6 +763,61 @@ export function Timeline({
                         </div>
                       );
                     })}
+
+                    {/* Transition handles between adjacent Video clips */}
+                    {track.kind === 'video' &&
+                      track.clips.slice(0, -1).map((rawPrev, idx) => {
+                        const rawNext = track.clips[idx + 1];
+                        if (rawPrev.type !== 'video' || !rawNext || rawNext.type !== 'video') {
+                          return null;
+                        }
+                        const effDur = getEffectiveTransitionDuration(rawPrev, rawNext);
+                        const hasTransition =
+                          Boolean(rawPrev.transitionOut && rawPrev.transitionOut.type !== 'none') &&
+                          effDur > 0;
+                        const cutCenterTime =
+                          (rawPrev.start + rawPrev.duration + rawNext.start) / 2;
+                        const isTrSelected = selectedTransitionClipId === rawPrev.id;
+                        const trLabel =
+                          hasTransition && rawPrev.transitionOut
+                            ? `${VIDEO_TRANSITION_META[rawPrev.transitionOut.type].label} (${effDur.toFixed(1)}s)`
+                            : 'Add transition at cut';
+
+                        return (
+                          <div key={`tr_${rawPrev.id}`}>
+                            {hasTransition && (
+                              <div
+                                style={{
+                                  left: rawNext.start * zoomPxPerSec,
+                                  width: Math.max(4, effDur * zoomPxPerSec),
+                                }}
+                                className="pointer-events-none absolute top-1 bottom-1 z-10 rounded bg-blue-400/20 ring-1 ring-blue-400/50"
+                              />
+                            )}
+                            <button
+                              type="button"
+                              disabled={disabled}
+                              title={trLabel}
+                              aria-label={trLabel}
+                              onPointerDown={(e) => e.stopPropagation()}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onSelectTransition(rawPrev.id);
+                              }}
+                              style={{ left: cutCenterTime * zoomPxPerSec }}
+                              className={`absolute top-1/2 z-20 flex h-5 w-5 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded border transition-colors disabled:opacity-40 ${
+                                isTrSelected
+                                  ? 'border-white bg-blue-500 text-white shadow'
+                                  : hasTransition
+                                    ? 'border-blue-400 bg-[#1B2A44] text-blue-200 hover:bg-blue-600 hover:text-white'
+                                    : 'border-[#3A455C] bg-[#11141B]/90 text-slate-400 hover:border-blue-400 hover:text-white'
+                              }`}
+                            >
+                              <ArrowLeftRight className="h-2.5 w-2.5" aria-hidden="true" />
+                            </button>
+                          </div>
+                        );
+                      })}
                   </div>
                 );
               })}

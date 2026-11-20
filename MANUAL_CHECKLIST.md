@@ -35,4 +35,14 @@ Use this checklist in desktop Chrome, Edge, and Firefox (>= 1024px viewport) to 
 - [ ] In the **AI** tab, select a language (and test `Auto-detect`) and click **Generate Captions**. Confirm timestamped clips populate the **Captions** track, appear on the preview, are editable in the Inspector, and export via **Download .srt**.
 
 ## 6. Audio-Only Export & Cancellation
-- [ ] Test **Quality** (`Small`, `Balanced`, `High`), **Export audio only (mp3)**, `> 2 minute` slow re-encode warning, and **Cancel Export** mid-render.
+- [ ] Test **Quality** (`Draft (480p, fast)`, `Small`, `Balanced`, `High`), **Export audio only (mp3)**, `> 2 minute` slow re-encode warning, heavy-effects `> 1 minute` (`>= 3` effects) warning, and **Cancel Export** mid-render.
+
+## 7. Animations, VFX Effects, Transitions & Draft Export (Step 2 End-to-End Check)
+- [ ] **Animated Title + Two Timed Effects + Video Cut Transition**:
+  1. Import **2+ video clips** onto the Video track.
+  2. Click the cut handle between Clip 1 and Clip 2 and add a **Transition** (`Fade`, `Dissolve`, `Wipe Left/Right`, or `Slide Left/Right`, duration `0.2–2.0 s`). Confirm Clip 2 overlaps cleanly on the timeline and later clips stay synced. Test Undo/Redo.
+  3. Add a **Text** clip (and optionally generate captions), select In/Out animations (`fade`, `slide-up/down/left/right`, or `pop`, duration `0.1–2.0 s`), verify preview motion, and click **Apply to all captions** when captions exist.
+  4. Open the **Effects** tab, add **2 different effects** at different times on the Effects track (e.g. `Blur` or `Vignette` at `1–4s`, plus `Sharpen`, `Film Grain`, `Glitch / RGB Split`, `Camera Shake`, `Pixelate`, `Black & White`, `Sepia`, `Invert`, `Mirror`, or `Flash (White)`).
+  5. Move, resize, and adjust **Intensity** (`0–100%`) in the Inspector. Confirm the `"Approximate preview · applied on export"` badge appears over the preview when non-CSS effects (`Sharpen`, `Film Grain`, `Glitch / RGB Split`, `Camera Shake`, `Pixelate`) or transition overlaps are at the playhead.
+  6. Open **Export Project**, test **Draft (480p, fast)** (confirms 480p short side / 24 fps downscale and faster render), export MP4, and confirm the animated title, both timed effects, and transition render cleanly in the downloaded video.
+
