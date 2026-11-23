@@ -8,6 +8,7 @@ interface SettingsDialogProps {
   onClose: () => void;
   onSaveKey: (key: string) => void;
   onRemoveKey: () => void;
+  onClearFfmpegCache: () => Promise<boolean>;
 }
 
 export function SettingsDialog({
@@ -17,14 +18,18 @@ export function SettingsDialog({
   onClose,
   onSaveKey,
   onRemoveKey,
+  onClearFfmpegCache,
 }: SettingsDialogProps) {
   const [keyInput, setKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
+  const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [isClearingCache, setIsClearingCache] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setKeyInput(storedKeyPreview ?? '');
       setShowKey(false);
+      setCacheMessage(null);
     }
   }, [isOpen, storedKeyPreview]);
 
@@ -50,6 +55,20 @@ export function SettingsDialog({
   const handleRemove = () => {
     setKeyInput('');
     onRemoveKey();
+  };
+
+  const handleClearCache = async () => {
+    if (isClearingCache) return;
+    setIsClearingCache(true);
+    setCacheMessage(null);
+    try {
+      const removed = await onClearFfmpegCache();
+      setCacheMessage(
+        removed ? 'Cached ffmpeg core cleared.' : 'No cached ffmpeg core found.'
+      );
+    } finally {
+      setIsClearingCache(false);
+    }
   };
 
   return (
@@ -162,6 +181,28 @@ export function SettingsDialog({
             </div>
           </div>
         </form>
+
+        <div className="mt-5 border-t border-[#232A38] pt-4">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="text-xs font-medium text-slate-300">FFmpeg Core Cache</p>
+              <p className="mt-0.5 text-[11px] text-slate-500">
+                Core files (~32 MB) are cached locally in this browser.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={isClearingCache}
+              onClick={() => void handleClearCache()}
+              className="shrink-0 rounded-lg border border-[#2C3547] bg-[#191F2C] px-3 py-1.5 text-[11px] font-medium text-slate-200 transition-colors hover:border-slate-500 disabled:opacity-50 whitespace-nowrap"
+            >
+              {isClearingCache ? 'Clearing...' : 'Clear cached ffmpeg core'}
+            </button>
+          </div>
+          {cacheMessage && (
+            <p className="mt-2 text-[11px] text-slate-400">{cacheMessage}</p>
+          )}
+        </div>
       </div>
     </div>
   );

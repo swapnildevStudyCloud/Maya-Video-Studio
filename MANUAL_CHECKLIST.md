@@ -46,3 +46,20 @@ Use this checklist in desktop Chrome, Edge, and Firefox (>= 1024px viewport) to 
   5. Move, resize, and adjust **Intensity** (`0–100%`) in the Inspector. Confirm the `"Approximate preview · applied on export"` badge appears over the preview when non-CSS effects (`Sharpen`, `Film Grain`, `Glitch / RGB Split`, `Camera Shake`, `Pixelate`) or transition overlaps are at the playhead.
   6. Open **Export Project**, test **Draft (480p, fast)** (confirms 480p short side / 24 fps downscale and faster render), export MP4, and confirm the animated title, both timed effects, and transition render cleanly in the downloaded video.
 
+## 8. Deleting Timeline Rows, Space & Compact Mode
+- [ ] Hover over any row header (or open on a touch screen) and confirm the small **Trash** icon and **`...`** button appear; also right-click a row header to open the **Delete row** menu.
+- [ ] Confirm **Video** cannot be deleted, and the last remaining row of **Effects**, **Text**, **Overlay**, **Audio**, and **Captions** has a disabled delete option with the tooltip `"At least one row of this kind is required"`.
+- [ ] Add `Effects 2` and `Effects 3` (keep `Effects 2` empty), delete `Effects 2`, and confirm it deletes immediately and `Effects 3` renumbers to `Effects 2`. Test `Ctrl/Cmd+Z` (Undo) and `Ctrl/Cmd+Shift+Z` (Redo).
+- [ ] Place clips in an extra row, select one of those clips, delete that row, confirm the prompt `"Delete this row and its N clips?"` appears, accept, and verify the row + clips are deleted, the Inspector selection clears, and a single Undo restores the row, its clips, and row numbering.
+- [ ] Add several empty extra rows (e.g. `Effects 2`, `Text 2`, `Overlay 2`), click **Remove empty rows** in the timeline toolbar, and confirm all empty extra rows vanish in one Undo step while at least one row of each kind stays.
+- [ ] Add enough rows to overflow the timeline height vertically; scroll down and horizontally and verify the time ruler stays fixed at the top, row headers stay fixed on the left and aligned with their track lanes, and **Compact rows** makes rows noticeably shorter.
+- [ ] When only one **Effects** or **Text** row remains, add an overlapping effect/text clip (auto-stacks row 2), delete an extra row, and export MP4 — confirm the downloaded video matches the remaining timeline clips.
+
+## 9. Import Edit Plan (Maya v1 JSON)
+- [ ] Upload two video clips (`intro.mp4` and `ai_scene1.mp4`), open **Import edit plan**, download the example plan (confirm it uses valid v1 JSON), and import a plan that trims and joins both clips. Export MP4 and confirm the downloaded video's duration and cut points match the plan.
+- [ ] Import a plan containing timed `texts` overlays and confirm the text clips appear with matching start/end timing in both preview playback and exported MP4.
+- [ ] Import a plan with `"captions": true` and confirm the notice `"captions is not applied yet; use the AI tab to generate captions."` appears cleanly while existing caption tools in the AI tab continue to work.
+- [ ] Try importing a plan referencing a file that is not uploaded and confirm `"Upload <file> first"` appears and the timeline stays untouched.
+- [ ] With existing clips on the timeline, import a valid plan, verify the **Replace / Cancel** prompt (Cancel keeps the timeline untouched; Replace clears old clips while keeping uploaded media), and confirm a single **Undo** (`Ctrl/Cmd+Z`) reverts the whole import.
+- [ ] Verify existing timeline editing, media uploads, AI captions, and **Settings** Gemini API key storage continue to work unchanged.
+

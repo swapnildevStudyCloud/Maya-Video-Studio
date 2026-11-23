@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react';
 import { ExportDialog } from './components/ExportDialog';
+import { ImportEditPlanDialog } from './components/ImportEditPlanDialog';
 import { InspectorPanel } from './components/InspectorPanel';
 import {
   LeftMediaPanel,
@@ -23,6 +24,7 @@ import {
   canUndo,
   captionsToSrt,
   captureVideoThumbnail,
+  clearCachedFfmpegCore,
   createEffectClip,
   createExportOutputFingerprint,
   createInitialEditorState,
@@ -36,8 +38,10 @@ import {
   getProjectDuration,
   getStoredGeminiApiKey,
   getVideoTrackInsertIndexAtTime,
+  hasTimelineContent,
   isSingleSimpleVideoClipProject,
   nextProjectId,
+  prepareAndVerifyEditPlanImport,
   probeAudioAssetMeta,
   probeImageDimensions,
   projectReducer,
@@ -64,6 +68,7 @@ import {
   type RenderResult,
   type TextAnimationType,
   type TextClip,
+  type ValidatedEditPlan,
   type VideoClip,
   type VideoEffectType,
   type VideoTransition,
@@ -119,6 +124,7 @@ export default function App() {
   const [isPreviewMuted, setIsPreviewMuted] = useState(false);
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isImportPlanOpen, setIsImportPlanOpen] = useState(false);
   const [storedApiKey, setStoredApiKey] = useState<string | null>(() =>
     getStoredGeminiApiKey()
   );
@@ -253,6 +259,12 @@ export default function App() {
     }
   }, [clearExportResult, exportResult, exportResultUrl, exportedFingerprint, isExporting, project]);
 
+  const existingClipCount = useMemo(
+    () => project.tracks.reduce((sum, t) => sum + t.clips.length, 0),
+    [project.tracks]
+  );
+  const hasExistingTimeline = useMemo(() => hasTimelineContent(editorState), [editorState]);
+
   const handleOpenExport = useCallback(() => {
     if (
       shouldInvalidateExportResult({
@@ -266,6 +278,41 @@ export default function App() {
     }
     setIsExportOpen(true);
   }, [clearExportResult, exportResult, exportResultUrl, exportedFingerprint, isExporting]);
+
+  const handleApplyEditPlan = useCallback(
+    (
+      plan: ValidatedEditPlan,
+      replaceExisting: boolean
+    ): { ok: true; captionsNotice: string | null } | { ok: false; error: string } => {
+      const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+      try {
+        const { actions } = prepareAndVerifyEditPlanImport({
+          editorState,
+          plan,
+          assets: assetsRef.current,
+          replaceExisting,
+        });
+        for (const action of actions) {
+          dispatch(action);
+        }
+        setSelectedTransitionClipId(null);
+        setIsPlaying(false);
+        setExportError(null);
+        const endedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const elapsedMs = Math.max(0, Math.round(endedAt - startedAt));
+        console.info(
+          `[EditPlan] Loaded ${plan.clips.length} clips, ${plan.texts.length} texts in ${elapsedMs}ms`
+        );
+        return { ok: true, captionsNotice: plan.captionsNotice };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err instanceof Error ? err.message : 'Could not apply edit plan.',
+        };
+      }
+    },
+    [editorState]
+  );
 
   const handleImportVideos = useCallback(
     async (files: File[]) => {
@@ -954,7 +1001,7 @@ export default function App() {
   // Global NLE keyboard shortcuts
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (isSettingsOpen || isExportOpen || isBusy) return;
+      if (isSettingsOpen || isExportOpen || isImportPlanOpen || isBusy) return;
 
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
@@ -1048,6 +1095,7 @@ export default function App() {
     handleTogglePlay,
     isBusy,
     isExportOpen,
+    isImportPlanOpen,
     isSettingsOpen,
     projectDuration,
     selectedClipId,
@@ -1084,6 +1132,7 @@ export default function App() {
           onUndo={() => dispatch({ type: 'UNDO' })}
           onRedo={() => dispatch({ type: 'REDO' })}
           hasApiKey={Boolean(storedApiKey)}
+          onOpenImportPlan={() => setIsImportPlanOpen(true)}
           onOpenSettings={() => setIsSettingsOpen(true)}
           onOpenExport={handleOpenExport}
           canExport={projectValidation.ok}
@@ -1177,6 +1226,8 @@ export default function App() {
           onDuplicateSelected={handleDuplicateSelected}
           onDeleteSelected={handleDeleteSelected}
           onAddTrackRow={(kind) => dispatch({ type: 'ADD_TRACK_ROW', kind })}
+          onDeleteTrackRow={(trackId) => dispatch({ type: 'DELETE_TRACK_ROW', trackId })}
+          onRemoveEmptyTrackRows={() => dispatch({ type: 'REMOVE_EMPTY_TRACK_ROWS' })}
           onToggleTrackMute={(trackId) => dispatch({ type: 'TOGGLE_TRACK_MUTE', trackId })}
           onToggleTrackHide={(trackId) => dispatch({ type: 'TOGGLE_TRACK_HIDE', trackId })}
           onDropAssetOnTimeline={handleDropAssetOnTimeline}
@@ -1190,6 +1241,20 @@ export default function App() {
         onClose={() => setIsSettingsOpen(false)}
         onSaveKey={handleSaveApiKey}
         onRemoveKey={handleRemoveApiKey}
+        onClearFfmpegCache={() => clearCachedFfmpegCore()}
+      />
+
+      <ImportEditPlanDialog
+        isOpen={isImportPlanOpen}
+        assets={assetsMap}
+        hasExistingTimelineContent={hasExistingTimeline}
+        existingClipCount={existingClipCount}
+        onClose={() => setIsImportPlanOpen(false)}
+        onApplyPlan={handleApplyEditPlan}
+        onOpenExport={() => {
+          setIsImportPlanOpen(false);
+          handleOpenExport();
+        }}
       />
 
       <ExportDialog

@@ -1,13 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canDeleteTrackRow,
   canRedo,
   canUndo,
+  compileProjectToFfmpegPlan,
+  createEffectClip,
   createInitialEditorState,
   createVideoClipFromMeta,
   findClipInProject,
+  getDeleteTrackRowBlockReason,
   getProjectDuration,
   getSnapTargets,
   hasOverlapOnTrack,
+  hasRemovableEmptyRows,
   MAX_TEXT_CLIP_LENGTH,
   MAX_VIDEO_TRACK_CLIPS,
   projectReducer,
@@ -15,6 +20,7 @@ import {
   snapTime,
   type AudioClip,
   type ImageClip,
+  type MediaAsset,
   type TextClip,
   type VideoFileMetadata,
 } from '../index';
@@ -386,5 +392,212 @@ describe('snap utilities', () => {
         toleranceSeconds: 0.1,
       })
     ).toEqual({ start: 2, snappedTo: 4 });
+  });
+});
+
+describe('timeline row deletion & empty row cleanup', () => {
+  it('protects the Video track and the last remaining row of every other kind (Effects, Text, Overlay, Audio, Captions)', () => {
+    let state = createInitialEditorState();
+    state = projectReducer(state, {
+      type: 'SET_CAPTION_CLIPS',
+      captions: [{ id: 'c1', start: 0, end: 2, text: 'Hi' }],
+    });
+
+    const tracks = state.history.present.tracks;
+    expect(tracks.map((t) => t.kind)).toEqual([
+      'video',
+      'captions',
+      'effects',
+      'text',
+      'image',
+      'audio',
+    ]);
+
+    for (const track of tracks) {
+      expect(canDeleteTrackRow(tracks, track.id)).toBe(false);
+      const reason = getDeleteTrackRowBlockReason(tracks, track.id);
+      if (track.kind === 'video') {
+        expect(reason).toBe('The Video track cannot be deleted');
+      } else {
+        expect(reason).toBe('At least one row of this kind is required');
+      }
+
+      const next = projectReducer(state, { type: 'DELETE_TRACK_ROW', trackId: track.id });
+      expect(next).toBe(state);
+    }
+  });
+
+  it('deletes an empty extra row, renumbers remaining rows of that kind, and supports single-step Undo/Redo', () => {
+    let state = createInitialEditorState();
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'effects' });
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'effects' });
+
+    let effectRows = state.history.present.tracks.filter((t) => t.kind === 'effects');
+    expect(effectRows.map((t) => t.name)).toEqual(['Effects', 'Effects 2', 'Effects 3']);
+
+    // Delete the first row (empty) -> Effects 2 and Effects 3 renumber to Effects and Effects 2
+    const firstRowId = effectRows[0].id;
+    expect(canDeleteTrackRow(state.history.present.tracks, firstRowId)).toBe(true);
+    state = projectReducer(state, { type: 'DELETE_TRACK_ROW', trackId: firstRowId });
+
+    effectRows = state.history.present.tracks.filter((t) => t.kind === 'effects');
+    expect(effectRows.map((t) => t.name)).toEqual(['Effects', 'Effects 2']);
+
+    // Undo restores all 3 rows and original names in one step
+    state = projectReducer(state, { type: 'UNDO' });
+    effectRows = state.history.present.tracks.filter((t) => t.kind === 'effects');
+    expect(effectRows.map((t) => t.name)).toEqual(['Effects', 'Effects 2', 'Effects 3']);
+
+    // Redo deletes the row and renumbers again
+    state = projectReducer(state, { type: 'REDO' });
+    effectRows = state.history.present.tracks.filter((t) => t.kind === 'effects');
+    expect(effectRows.map((t) => t.name)).toEqual(['Effects', 'Effects 2']);
+  });
+
+  it('deletes a non-empty row with its clips, clears selection only if selected clip was in that row, and undoes/redoes in one step', () => {
+    let state = createInitialEditorState();
+    state = projectReducer(state, {
+      type: 'ADD_CLIP',
+      clip: makeTextClip('t_keep', 0, 3, 'Keep me'),
+    });
+    state = projectReducer(state, {
+      type: 'ADD_CLIP',
+      clip: makeTextClip('t_del', 1, 3, 'Delete me'),
+    });
+
+    const textRowsBefore = state.history.present.tracks.filter((t) => t.kind === 'text');
+    expect(textRowsBefore).toHaveLength(2);
+    expect(textRowsBefore.map((t) => t.name)).toEqual(['Text', 'Text 2']);
+
+    // Selected clip is in Text 2 (auto-selected on ADD_CLIP) -> deleting Text 2 clears selection
+    expect(state.selectedClipId).toBe('t_del');
+    state = projectReducer(state, { type: 'DELETE_TRACK_ROW', trackId: textRowsBefore[1].id });
+
+    expect(state.selectedClipId).toBeNull();
+    expect(findClipInProject(state.history.present, 't_del')).toBeNull();
+    expect(findClipInProject(state.history.present, 't_keep')).not.toBeNull();
+    expect(state.history.present.tracks.filter((t) => t.kind === 'text')).toHaveLength(1);
+
+    // Undo restores Text 2 and its clip in one step
+    state = projectReducer(state, { type: 'UNDO' });
+    expect(findClipInProject(state.history.present, 't_del')).not.toBeNull();
+    expect(state.history.present.tracks.filter((t) => t.kind === 'text')).toHaveLength(2);
+
+    // If selection is on t_keep (row 1) and we delete row 2, selection stays on t_keep
+    state = projectReducer(state, { type: 'SELECT_CLIP', clipId: 't_keep' });
+    state = projectReducer(state, { type: 'DELETE_TRACK_ROW', trackId: textRowsBefore[1].id });
+    expect(state.selectedClipId).toBe('t_keep');
+    expect(findClipInProject(state.history.present, 't_del')).toBeNull();
+
+    // Redo check after another undo
+    state = projectReducer(state, { type: 'UNDO' });
+    expect(findClipInProject(state.history.present, 't_del')).not.toBeNull();
+    state = projectReducer(state, { type: 'REDO' });
+    expect(findClipInProject(state.history.present, 't_del')).toBeNull();
+  });
+
+  it('removes all empty extra rows across kinds in one undoable REMOVE_EMPTY_TRACK_ROWS step while preserving last row of each kind', () => {
+    let state = createInitialEditorState();
+    expect(hasRemovableEmptyRows(state.history.present.tracks)).toBe(false);
+
+    // No-op when no empty extra rows exist
+    const unchanged = projectReducer(state, { type: 'REMOVE_EMPTY_TRACK_ROWS' });
+    expect(unchanged).toBe(state);
+
+    // Add 2 extra Effects rows (all empty), 2 extra Text rows (put clip in Text 2 only), 1 extra Overlay row (empty)
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'effects' });
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'effects' });
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'text' });
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'text' });
+    const textRow2 = state.history.present.tracks.filter((t) => t.kind === 'text')[1];
+    state = projectReducer(state, {
+      type: 'ADD_CLIP',
+      clip: makeTextClip('t_row2', 1, 2, 'Row 2'),
+      trackId: textRow2.id,
+    });
+    state = projectReducer(state, { type: 'ADD_TRACK_ROW', kind: 'image' });
+
+    expect(hasRemovableEmptyRows(state.history.present.tracks)).toBe(true);
+
+    // Remove all empty extra rows at once
+    state = projectReducer(state, { type: 'REMOVE_EMPTY_TRACK_ROWS' });
+
+    const tracks = state.history.present.tracks;
+    expect(tracks.filter((t) => t.kind === 'effects').map((t) => t.name)).toEqual(['Effects']);
+    const textRows = tracks.filter((t) => t.kind === 'text');
+    expect(textRows.map((t) => t.name)).toEqual(['Text']);
+    expect(textRows[0].clips.map((c) => c.id)).toEqual(['t_row2']);
+    expect(tracks.filter((t) => t.kind === 'image').map((t) => t.name)).toEqual(['Overlay']);
+    expect(hasRemovableEmptyRows(tracks)).toBe(false);
+
+    // One undo restores all removed empty rows
+    state = projectReducer(state, { type: 'UNDO' });
+    expect(state.history.present.tracks.filter((t) => t.kind === 'effects')).toHaveLength(3);
+    expect(state.history.present.tracks.filter((t) => t.kind === 'text')).toHaveLength(3);
+    expect(state.history.present.tracks.filter((t) => t.kind === 'image')).toHaveLength(2);
+
+    // Redo removes them again in one step
+    state = projectReducer(state, { type: 'REDO' });
+    expect(state.history.present.tracks.filter((t) => t.kind === 'effects')).toHaveLength(1);
+    expect(state.history.present.tracks.filter((t) => t.kind === 'text')).toHaveLength(1);
+    expect(state.history.present.tracks.filter((t) => t.kind === 'image')).toHaveLength(1);
+  });
+
+  it('allows adding overlapping effects/text when 1 row remains and exports matching remaining timeline', () => {
+    let state = createInitialEditorState();
+    state = projectReducer(state, {
+      type: 'LOAD_VIDEO_PROJECT',
+      meta: makeMeta({ name: 'clip.mp4', duration: 8 }),
+      assetId: 'asset_vid_1',
+    });
+
+    // Stack 2 effects, delete row 1 (leaving 1 row), then add an overlapping effect
+    const e1 = createEffectClip({ id: 'efx_1', effectType: 'blur', start: 0, duration: 4 });
+    const e2 = createEffectClip({ id: 'efx_2', effectType: 'bw', start: 1, duration: 4 });
+    state = projectReducer(state, { type: 'ADD_CLIP', clip: e1 });
+    state = projectReducer(state, { type: 'ADD_CLIP', clip: e2 });
+
+    const effectRow1 = state.history.present.tracks.filter((t) => t.kind === 'effects')[0];
+    state = projectReducer(state, { type: 'DELETE_TRACK_ROW', trackId: effectRow1.id });
+    expect(state.history.present.tracks.filter((t) => t.kind === 'effects')).toHaveLength(1);
+
+    // Adding an overlapping effect auto-creates Effects 2 cleanly
+    const e3 = createEffectClip({ id: 'efx_3', effectType: 'vignette', start: 2, duration: 3 });
+    state = projectReducer(state, { type: 'ADD_CLIP', clip: e3 });
+    expect(
+      state.history.present.tracks.filter((t) => t.kind === 'effects').map((t) => t.name)
+    ).toEqual(['Effects', 'Effects 2']);
+
+    const assets = new Map<string, MediaAsset>([
+      [
+        'asset_vid_1',
+        {
+          id: 'asset_vid_1',
+          kind: 'video',
+          name: 'clip.mp4',
+          size: 5_000_000,
+          extension: 'mp4',
+          file: new File([new Uint8Array(16)], 'clip.mp4', { type: 'video/mp4' }),
+          objectUrl: 'blob:vid',
+          thumbnailUrl: undefined,
+          duration: 8,
+          width: 1920,
+          height: 1080,
+        },
+      ],
+    ]);
+
+    const plan = compileProjectToFfmpegPlan({
+      project: state.history.present,
+      assets,
+      hasSourceAudio: true,
+    });
+    const filterArgIdx = plan.args.indexOf('-filter_complex');
+    expect(filterArgIdx).toBeGreaterThan(-1);
+    const filterComplex = plan.args[filterArgIdx + 1];
+    // Deleted efx_1 (blur) must be absent; remaining efx_2 (bw / hue=s=0) and efx_3 (vignette) must be exported
+    expect(filterComplex).not.toContain('boxblur=');
+    expect(filterComplex).toContain('hue=s=0');
+    expect(filterComplex).toContain('vignette=');
   });
 });

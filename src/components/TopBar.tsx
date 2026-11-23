@@ -1,4 +1,4 @@
-import { Download, Film, Redo2, Settings, Undo2 } from 'lucide-react';
+import { Download, FileJson, Film, Redo2, Settings, Undo2 } from 'lucide-react';
 
 interface TopBarProps {
   projectName: string;
@@ -8,6 +8,7 @@ interface TopBarProps {
   onUndo: () => void;
   onRedo: () => void;
   hasApiKey: boolean;
+  onOpenImportPlan: () => void;
   onOpenSettings: () => void;
   onOpenExport: () => void;
   canExport: boolean;
@@ -22,13 +23,14 @@ export function TopBar({
   onUndo,
   onRedo,
   hasApiKey,
+  onOpenImportPlan,
   onOpenSettings,
   onOpenExport,
   canExport,
   isBusy,
 }: TopBarProps) {
   return (
-    <header className="flex h-12 shrink-0 items-center justify-between gap-8 border-b border-[#232A38] bg-[#11141B] px-4">
+    <header className="flex h-12 shrink-0 items-center justify-between gap-6 border-b border-[#232A38] bg-[#11141B] px-4">
       <div className="flex min-w-0 items-center gap-3">
         <div className="flex items-center gap-2 whitespace-nowrap shrink-0">
           <Film className="h-4 w-4 text-blue-500" aria-hidden="true" />
@@ -75,6 +77,17 @@ export function TopBar({
         </button>
 
         <div className="mx-1 h-4 w-px bg-[#232A38]" aria-hidden="true" />
+
+        <button
+          type="button"
+          disabled={isBusy}
+          onClick={onOpenImportPlan}
+          title="Import a Maya v1 JSON edit plan"
+          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-[#232A38] bg-[#131720] px-3 text-xs font-medium text-slate-200 transition-colors hover:border-[#3A455C] disabled:cursor-not-allowed disabled:opacity-40 whitespace-nowrap shrink-0"
+        >
+          <FileJson className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />
+          <span>Import edit plan</span>
+        </button>
 
         <button
           type="button"

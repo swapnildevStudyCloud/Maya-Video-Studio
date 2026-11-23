@@ -182,6 +182,8 @@ export type ProjectAction =
   | { type: 'LOAD_VIDEO_PROJECT'; meta: VideoFileMetadata; assetId: string }
   | { type: 'ADD_CLIP'; clip: TimelineClip; trackId?: string; insertIndex?: number; atPlayhead?: boolean }
   | { type: 'ADD_TRACK_ROW'; kind: 'text' | 'image' | 'effects' }
+  | { type: 'DELETE_TRACK_ROW'; trackId: string }
+  | { type: 'REMOVE_EMPTY_TRACK_ROWS' }
   | { type: 'MOVE_CLIP'; clipId: string; start: number; targetTrackId?: string }
   | { type: 'REORDER_VIDEO_CLIP'; clipId: string; toIndex: number }
   | { type: 'RESIZE_CLIP'; clipId: string; edge: 'left' | 'right'; time: number }
@@ -308,13 +310,95 @@ function isTrackCompatibleWithClip(trackKind: TrackKind, clip: TimelineClip): bo
   return trackKind === getExpectedTrackKind(clip);
 }
 
+export function getTrackKindBaseLabel(kind: TrackKind): string {
+  switch (kind) {
+    case 'video':
+      return 'Video';
+    case 'effects':
+      return 'Effects';
+    case 'captions':
+      return 'Captions';
+    case 'text':
+      return 'Text';
+    case 'image':
+      return 'Overlay';
+    case 'audio':
+      return 'Audio';
+  }
+}
+
+export function renumberTrackRows(tracks: TimelineTrack[]): TimelineTrack[] {
+  const counts = new Map<TrackKind, number>();
+  return tracks.map((track) => {
+    const nextNum = (counts.get(track.kind) ?? 0) + 1;
+    counts.set(track.kind, nextNum);
+    const base = getTrackKindBaseLabel(track.kind);
+    const expectedName = nextNum === 1 ? base : `${base} ${nextNum}`;
+    return track.name === expectedName ? track : { ...track, name: expectedName };
+  });
+}
+
+export function getDeleteTrackRowBlockReason(
+  tracks: TimelineTrack[],
+  trackId: string
+): string | null {
+  const track = tracks.find((t) => t.id === trackId);
+  if (!track) return 'Row not found';
+  if (track.kind === 'video') {
+    return 'The Video track cannot be deleted';
+  }
+  const sameKindCount = tracks.filter((t) => t.kind === track.kind).length;
+  if (sameKindCount <= 1) {
+    return 'At least one row of this kind is required';
+  }
+  return null;
+}
+
+export function canDeleteTrackRow(tracks: TimelineTrack[], trackId: string): boolean {
+  return getDeleteTrackRowBlockReason(tracks, trackId) === null;
+}
+
+export function getRemovableEmptyRowIds(tracks: TimelineTrack[]): Set<string> {
+  const removable = new Set<string>();
+  const byKind = new Map<TrackKind, TimelineTrack[]>();
+  for (const track of tracks) {
+    if (track.kind === 'video') continue;
+    const list = byKind.get(track.kind) ?? [];
+    list.push(track);
+    byKind.set(track.kind, list);
+  }
+
+  for (const kindTracks of byKind.values()) {
+    if (kindTracks.length <= 1) continue;
+    const hasNonEmpty = kindTracks.some((t) => t.clips.length > 0);
+    if (hasNonEmpty) {
+      for (const track of kindTracks) {
+        if (track.clips.length === 0) {
+          removable.add(track.id);
+        }
+      }
+    } else {
+      // Keep the first row so at least one row of this kind remains
+      for (let i = 1; i < kindTracks.length; i++) {
+        removable.add(kindTracks[i].id);
+      }
+    }
+  }
+
+  return removable;
+}
+
+export function hasRemovableEmptyRows(tracks: TimelineTrack[]): boolean {
+  return getRemovableEmptyRowIds(tracks).size > 0;
+}
+
 function insertStackableTrack(
   tracks: TimelineTrack[],
   kind: 'text' | 'image' | 'effects',
   initialClips: TimelineClip[] = []
 ): { tracks: TimelineTrack[]; createdTrack: TimelineTrack } {
   const existingCount = tracks.filter((t) => t.kind === kind).length;
-  const labelBase = kind === 'text' ? 'Text' : kind === 'image' ? 'Overlay' : 'Effects';
+  const labelBase = getTrackKindBaseLabel(kind);
   const createdTrack: TimelineTrack = {
     id: nextProjectId(`track-${kind}`),
     kind,
@@ -352,7 +436,7 @@ function insertStackableTrack(
     insertIdx = lastImage >= 0 ? lastImage + 1 : audioIdx >= 0 ? audioIdx : nextTracks.length;
   }
   nextTracks.splice(insertIdx, 0, createdTrack);
-  return { tracks: nextTracks, createdTrack };
+  return { tracks: renumberTrackRows(nextTracks), createdTrack };
 }
 
 function ensureCaptionsTrack(tracks: TimelineTrack[], captionClips: TextClip[]): TimelineTrack[] {
@@ -766,6 +850,29 @@ export function projectReducer(
     case 'ADD_TRACK_ROW': {
       const { tracks } = insertStackableTrack(project.tracks, action.kind);
       return applyProjectMutation(state, { ...project, tracks });
+    }
+
+    case 'DELETE_TRACK_ROW': {
+      if (!canDeleteTrackRow(project.tracks, action.trackId)) {
+        return state;
+      }
+      const targetTrack = project.tracks.find((t) => t.id === action.trackId);
+      if (!targetTrack) return state;
+
+      const selectedWasInRow = targetTrack.clips.some((c) => c.id === state.selectedClipId);
+      const nextSelected = selectedWasInRow ? null : state.selectedClipId;
+      const remaining = project.tracks.filter((t) => t.id !== action.trackId);
+      const nextTracks = renumberTrackRows(remaining);
+
+      return applyProjectMutation(state, { ...project, tracks: nextTracks }, nextSelected);
+    }
+
+    case 'REMOVE_EMPTY_TRACK_ROWS': {
+      const removableIds = getRemovableEmptyRowIds(project.tracks);
+      if (removableIds.size === 0) return state;
+      const remaining = project.tracks.filter((t) => !removableIds.has(t.id));
+      const nextTracks = renumberTrackRows(remaining);
+      return applyProjectMutation(state, { ...project, tracks: nextTracks });
     }
 
     case 'ADD_CLIP': {
