@@ -670,6 +670,7 @@ export default function App() {
       animInDuration: number;
       animOutType: TextAnimationType;
       animOutDuration: number;
+      fadeWithSlide: boolean;
     }) => {
       dispatch({ type: 'APPLY_ANIMATION_TO_ALL_CAPTIONS', ...config });
     },

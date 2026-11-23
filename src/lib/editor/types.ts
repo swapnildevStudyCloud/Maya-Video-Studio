@@ -243,6 +243,7 @@ export interface TextClip {
   animInDuration?: number;
   animOutType?: TextAnimationType;
   animOutDuration?: number;
+  fadeWithSlide?: boolean;
 }
 
 export interface ImageClip {

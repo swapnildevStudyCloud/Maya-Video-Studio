@@ -55,11 +55,21 @@ export function clampTextAnimationDuration(seconds: number | undefined): number 
   );
 }
 
+export function isSlideTextAnimation(type: TextAnimationType | undefined): boolean {
+  return (
+    type === 'slide-up' ||
+    type === 'slide-down' ||
+    type === 'slide-left' ||
+    type === 'slide-right'
+  );
+}
+
 export function resolveTextClipAnimationConfig(clip: TextClip): {
   animInType: TextAnimationType;
   animInDuration: number;
   animOutType: TextAnimationType;
   animOutDuration: number;
+  fadeWithSlide: boolean;
 } {
   const animInType: TextAnimationType =
     clip.animInType && ALLOWED_TEXT_ANIMATIONS.includes(clip.animInType)
@@ -74,6 +84,7 @@ export function resolveTextClipAnimationConfig(clip: TextClip): {
     animInDuration: clampTextAnimationDuration(clip.animInDuration),
     animOutType,
     animOutDuration: clampTextAnimationDuration(clip.animOutDuration),
+    fadeWithSlide: typeof clip.fadeWithSlide === 'boolean' ? clip.fadeWithSlide : true,
   };
 }
 
@@ -113,6 +124,7 @@ export function buildDrawtextAnimationExpressions(params: {
   animInDuration: number;
   animOutType: TextAnimationType;
   animOutDuration: number;
+  fadeWithSlide?: boolean;
 }): {
   xExpr: string;
   yExpr: string;
@@ -142,13 +154,19 @@ export function buildDrawtextAnimationExpressions(params: {
   const outSlideMove = outD ? `(1-pow(clip((${e}-t)/${outD}\\,0\\,1)\\,3))` : '0';
   const hFactor = (TEXT_SLIDE_HORIZONTAL_PCT / 100).toFixed(2);
   const vFactor = (TEXT_SLIDE_VERTICAL_PCT / 100).toFixed(2);
+  const fadeWithSlide = params.fadeWithSlide ?? true;
 
-  // Alpha (fade in / fade out)
+  // Alpha (fade in / fade out, plus slide-in / slide-out when fadeWithSlide is enabled)
+  const inFades =
+    params.animInType === 'fade' || (fadeWithSlide && isSlideTextAnimation(params.animInType));
+  const outFades =
+    params.animOutType === 'fade' || (fadeWithSlide && isSlideTextAnimation(params.animOutType));
+
   const alphaFactors: string[] = [];
-  if (params.animInType === 'fade' && inD) {
+  if (inFades && inD) {
     alphaFactors.push(inU);
   }
-  if (params.animOutType === 'fade' && outD) {
+  if (outFades && outD) {
     alphaFactors.push(outV);
   }
   const alphaExpr = alphaFactors.length > 0 ? `'${alphaFactors.join('*')}'` : null;
@@ -205,7 +223,7 @@ export function evaluateTextAnimationPreview(
   clip: TextClip,
   playhead: number
 ): { opacity: number; scale: number; offsetXPct: number; offsetYPct: number } {
-  const { animInType, animInDuration, animOutType, animOutDuration } =
+  const { animInType, animInDuration, animOutType, animOutDuration, fadeWithSlide } =
     resolveTextClipAnimationConfig(clip);
   const { inDuration, outDuration } = resolveEffectiveAnimationDurations({
     clipDuration: clip.duration,
@@ -228,9 +246,14 @@ export function evaluateTextAnimationPreview(
       ? 1 - Math.pow(Math.max(0, Math.min(1, (e - playhead) / outDuration)), 3)
       : 0;
 
+  const inFades =
+    animInType === 'fade' || (fadeWithSlide && isSlideTextAnimation(animInType));
+  const outFades =
+    animOutType === 'fade' || (fadeWithSlide && isSlideTextAnimation(animOutType));
+
   let opacity = 1;
-  if (animInType === 'fade' && inDuration > 0) opacity *= inU;
-  if (animOutType === 'fade' && outDuration > 0) opacity *= outV;
+  if (inFades && inDuration > 0) opacity *= inU;
+  if (outFades && outDuration > 0) opacity *= outV;
 
   let scale = 1;
   if (animInType === 'pop' && inDuration > 0) scale *= 0.2 + 0.8 * inU;

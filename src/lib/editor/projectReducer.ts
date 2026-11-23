@@ -2,6 +2,7 @@ import {
   clampEffectIntensity,
   clampTextAnimationDuration,
   getEffectiveTransitionDuration,
+  isSlideTextAnimation,
   normalizeVideoTransition,
 } from './effectsAndAnimations';
 import {
@@ -196,6 +197,7 @@ export type ProjectAction =
       animInDuration: number;
       animOutType: TextAnimationType;
       animOutDuration: number;
+      fadeWithSlide?: boolean;
     }
   | { type: 'TOGGLE_TRACK_MUTE'; trackId: string }
   | { type: 'TOGGLE_TRACK_HIDE'; trackId: string }
@@ -446,6 +448,25 @@ function sanitizeClipPatch(
         ? Math.min(maxAllowedDur, Math.max(MIN_CLIP_DURATION_SECONDS, p.duration))
         : Math.min(maxAllowedDur, clip.duration);
 
+    const nextInType =
+      p.animInType && ALLOWED_TEXT_ANIMATIONS.includes(p.animInType)
+        ? p.animInType
+        : (clip.animInType ?? 'none');
+    const nextOutType =
+      p.animOutType && ALLOWED_TEXT_ANIMATIONS.includes(p.animOutType)
+        ? p.animOutType
+        : (clip.animOutType ?? 'none');
+    const hadSlide =
+      isSlideTextAnimation(clip.animInType) || isSlideTextAnimation(clip.animOutType);
+    const hasSlide =
+      isSlideTextAnimation(nextInType) || isSlideTextAnimation(nextOutType);
+    const nextFadeWithSlide =
+      typeof p.fadeWithSlide === 'boolean'
+        ? p.fadeWithSlide
+        : !hadSlide && hasSlide && clip.fadeWithSlide === undefined
+          ? true
+          : clip.fadeWithSlide;
+
     return {
       ...clip,
       text:
@@ -474,22 +495,17 @@ function sanitizeClipPatch(
         typeof p.yPercent === 'number' && Number.isFinite(p.yPercent)
           ? Math.max(5, Math.min(95, p.yPercent))
           : clip.yPercent,
-      animInType:
-        p.animInType && ALLOWED_TEXT_ANIMATIONS.includes(p.animInType)
-          ? p.animInType
-          : (clip.animInType ?? 'none'),
+      animInType: nextInType,
       animInDuration:
         typeof p.animInDuration === 'number'
           ? clampTextAnimationDuration(p.animInDuration)
           : (clip.animInDuration ?? DEFAULT_TEXT_ANIMATION_SECONDS),
-      animOutType:
-        p.animOutType && ALLOWED_TEXT_ANIMATIONS.includes(p.animOutType)
-          ? p.animOutType
-          : (clip.animOutType ?? 'none'),
+      animOutType: nextOutType,
       animOutDuration:
         typeof p.animOutDuration === 'number'
           ? clampTextAnimationDuration(p.animOutDuration)
           : (clip.animOutDuration ?? DEFAULT_TEXT_ANIMATION_SECONDS),
+      fadeWithSlide: nextFadeWithSlide,
     };
   }
 
@@ -1285,6 +1301,8 @@ export function projectReducer(
         : 'none';
       const animInDuration = clampTextAnimationDuration(action.animInDuration);
       const animOutDuration = clampTextAnimationDuration(action.animOutDuration);
+      const fadeWithSlide =
+        typeof action.fadeWithSlide === 'boolean' ? action.fadeWithSlide : true;
 
       const nextTracks = project.tracks.map((t) => {
         if (t.kind !== 'captions') return t;
@@ -1298,6 +1316,7 @@ export function projectReducer(
                   animInDuration,
                   animOutType,
                   animOutDuration,
+                  fadeWithSlide,
                 }
               : c
           ),

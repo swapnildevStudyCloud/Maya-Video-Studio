@@ -126,6 +126,7 @@ export {
   evaluateTextAnimationPreview,
   getEffectiveTransitionDuration,
   getHeavyExportWarningInfo,
+  isSlideTextAnimation,
   normalizeVideoTransition,
   resolveEffectiveAnimationDurations,
   resolveTextClipAnimationConfig,

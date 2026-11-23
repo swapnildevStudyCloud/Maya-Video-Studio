@@ -122,11 +122,80 @@ describe('Text animation expression & preview builders', () => {
 
     expect(slides.xExpr).toContain('(1-pow(clip((4.000-t)/0.500\\,0\\,1)\\,3))*w*0.20');
     expect(slides.yExpr).toContain('pow(clip(1-(t-1.000)/0.500\\,0\\,1)\\,3)*h*0.12');
-    expect(slides.alphaExpr).toBeNull();
+    expect(slides.alphaExpr).toBe("'clip((t-1.000)/0.500\\,0\\,1)*clip((4.000-t)/0.500\\,0\\,1)'");
     expect(slides.fontsizeExpr).toBe('36');
+
+    const slideInOnly = buildDrawtextAnimationExpressions({
+      start: 2,
+      duration: 4,
+      baseFontSize: 36,
+      baseXExpr: 'w*0.5',
+      baseYExpr: 'h*0.5',
+      animInType: 'slide-right',
+      animInDuration: 0.5,
+      animOutType: 'none',
+      animOutDuration: 0.5,
+    });
+    expect(slideInOnly.alphaExpr).toBe("'clip((t-2.000)/0.500\\,0\\,1)'");
+
+    const slideOutOnly = buildDrawtextAnimationExpressions({
+      start: 2,
+      duration: 4,
+      baseFontSize: 36,
+      baseXExpr: 'w*0.5',
+      baseYExpr: 'h*0.5',
+      animInType: 'none',
+      animInDuration: 0.5,
+      animOutType: 'slide-down',
+      animOutDuration: 0.5,
+    });
+    expect(slideOutOnly.alphaExpr).toBe("'clip((6.000-t)/0.500\\,0\\,1)'");
+
+    const mixedSlideFade = buildDrawtextAnimationExpressions({
+      start: 1,
+      duration: 3,
+      baseFontSize: 36,
+      baseXExpr: 'w*0.5',
+      baseYExpr: 'h*0.5',
+      animInType: 'slide-left',
+      animInDuration: 0.5,
+      animOutType: 'fade',
+      animOutDuration: 0.6,
+    });
+    expect(mixedSlideFade.alphaExpr).toBe(
+      "'clip((t-1.000)/0.500\\,0\\,1)*clip((4.000-t)/0.600\\,0\\,1)'"
+    );
+
+    const slideNoFade = buildDrawtextAnimationExpressions({
+      start: 1,
+      duration: 3,
+      baseFontSize: 36,
+      baseXExpr: 'w*0.5',
+      baseYExpr: 'h*0.8',
+      animInType: 'slide-up',
+      animInDuration: 0.5,
+      animOutType: 'slide-left',
+      animOutDuration: 0.5,
+      fadeWithSlide: false,
+    });
+    expect(slideNoFade.alphaExpr).toBeNull();
+
+    const mixedSlideOffFadeOn = buildDrawtextAnimationExpressions({
+      start: 1,
+      duration: 3,
+      baseFontSize: 36,
+      baseXExpr: 'w*0.5',
+      baseYExpr: 'h*0.5',
+      animInType: 'slide-up',
+      animInDuration: 0.5,
+      animOutType: 'fade',
+      animOutDuration: 0.6,
+      fadeWithSlide: false,
+    });
+    expect(mixedSlideOffFadeOn.alphaExpr).toBe("'clip((4.000-t)/0.600\\,0\\,1)'");
   });
 
-  it('defaults In/Out animation duration to 0.5 s and uses 20% width / 12% height constants', () => {
+  it('defaults In/Out animation duration to 0.5 s, fadeWithSlide to true, and uses 20% width / 12% height constants', () => {
     expect(DEFAULT_TEXT_ANIMATION_SECONDS).toBe(0.5);
     expect(TEXT_SLIDE_HORIZONTAL_PCT).toBe(20);
     expect(TEXT_SLIDE_VERTICAL_PCT).toBe(12);
@@ -148,6 +217,7 @@ describe('Text animation expression & preview builders', () => {
     });
     expect(resolved.animInDuration).toBe(0.5);
     expect(resolved.animOutDuration).toBe(0.5);
+    expect(resolved.fadeWithSlide).toBe(true);
   });
 
   it('scales down animation durations proportionally when animIn + animOut exceed clip duration', () => {
@@ -218,27 +288,53 @@ describe('Text animation expression & preview builders', () => {
       animOutDuration: 0.5,
     };
 
-    // t=1.0: start of slide-up in (+12% frame height)
+    // t=1.0: start of slide-up in (+12% frame height, opacity 0)
     const atInStart = evaluateTextAnimationPreview(clip, 1.0);
     expect(atInStart.offsetYPct).toBeCloseTo(12, 4);
     expect(atInStart.offsetXPct).toBeCloseTo(0, 4);
+    expect(atInStart.opacity).toBeCloseTo(0, 4);
 
-    // t=1.25 (50% of 0.5s in): cubic ease-out leaves 0.5^3 = 12.5% remaining (1.5%, not linear 6%)
+    // t=1.25 (50% of 0.5s in): cubic ease-out leaves 0.5^3 = 12.5% remaining (1.5%, not linear 6%), opacity 0.5
     const atInHalf = evaluateTextAnimationPreview(clip, 1.25);
     expect(atInHalf.offsetYPct).toBeCloseTo(1.5, 4);
+    expect(atInHalf.opacity).toBeCloseTo(0.5, 4);
 
-    // t=2.0: settled in center
+    // t=2.0: settled in center, opacity 1
     const atRest = evaluateTextAnimationPreview(clip, 2.0);
     expect(atRest.offsetXPct).toBeCloseTo(0, 4);
     expect(atRest.offsetYPct).toBeCloseTo(0, 4);
+    expect(atRest.opacity).toBeCloseTo(1, 4);
 
-    // t=3.75 (50% of 0.5s out): cubic ease-out reaches 1 - 0.5^3 = 87.5% of -20% (-17.5%)
+    // t=3.75 (50% of 0.5s out): cubic ease-out reaches 1 - 0.5^3 = 87.5% of -20% (-17.5%), opacity 0.5
     const atOutHalf = evaluateTextAnimationPreview(clip, 3.75);
     expect(atOutHalf.offsetXPct).toBeCloseTo(-17.5, 4);
+    expect(atOutHalf.opacity).toBeCloseTo(0.5, 4);
 
-    // t=4.0: end of slide-left out (-20% frame width)
+    // t=4.0: end of slide-left out (-20% frame width, opacity 0)
     const atOutEnd = evaluateTextAnimationPreview(clip, 4.0);
     expect(atOutEnd.offsetXPct).toBeCloseTo(-20, 4);
+    expect(atOutEnd.opacity).toBeCloseTo(0, 4);
+
+    // Mixed In=slide-up + Out=fade multiplies opacity factors
+    const mixedClip: TextClip = {
+      ...clip,
+      duration: 1.0,
+      animInType: 'slide-up',
+      animInDuration: 0.6,
+      animOutType: 'fade',
+      animOutDuration: 0.6,
+    };
+    // Scaled proportionally to 0.5s in + 0.5s out; at t=1.25 -> inU=0.5, outV=1.0 -> opacity 0.5
+    expect(evaluateTextAnimationPreview(mixedClip, 1.25).opacity).toBeCloseTo(0.5, 4);
+    // At t=1.75 -> inU=1.0, outV=0.5 -> opacity 0.5
+    expect(evaluateTextAnimationPreview(mixedClip, 1.75).opacity).toBeCloseTo(0.5, 4);
+
+    // fadeWithSlide: false keeps opacity=1 during slide while preserving slide motion
+    const slideNoFadeClip: TextClip = { ...clip, fadeWithSlide: false };
+    const noFadeAtStart = evaluateTextAnimationPreview(slideNoFadeClip, 1.0);
+    expect(noFadeAtStart.offsetYPct).toBeCloseTo(12, 4);
+    expect(noFadeAtStart.opacity).toBeCloseTo(1, 4);
+    expect(evaluateTextAnimationPreview(slideNoFadeClip, 4.0).opacity).toBeCloseTo(1, 4);
   });
 });
 
@@ -429,6 +525,7 @@ describe('projectReducer Effects track, transitions & caption animation sync', (
       animInDuration: 0.3,
       animOutType: 'fade',
       animOutDuration: 0.4,
+      fadeWithSlide: false,
     });
 
     const captionsTrack = state.history.present.tracks.find((t) => t.kind === 'captions')!;
@@ -439,8 +536,64 @@ describe('projectReducer Effects track, transitions & caption animation sync', (
         expect(clip.animInDuration).toBe(0.3);
         expect(clip.animOutType).toBe('fade');
         expect(clip.animOutDuration).toBe(0.4);
+        expect(clip.fadeWithSlide).toBe(false);
       }
     }
+
+    // Undo restores previous caption animation settings
+    state = projectReducer(state, { type: 'UNDO' });
+    const restoredTrack = state.history.present.tracks.find((t) => t.kind === 'captions')!;
+    for (const clip of restoredTrack.clips) {
+      if (clip.type === 'text') {
+        expect(clip.animInType).toBeUndefined();
+        expect(clip.fadeWithSlide).toBeUndefined();
+      }
+    }
+  });
+
+  it('defaults fadeWithSlide to ON for new slide animations and supports undo/redo', () => {
+    let state = createInitialEditorState();
+    const txt: TextClip = {
+      id: 'txt_fade_default',
+      type: 'text',
+      name: 'Sample',
+      start: 0,
+      duration: 3,
+      sourceOffset: 0,
+      text: 'Sample',
+      size: 'medium',
+      color: 'white',
+      backgroundBox: true,
+      align: 'center',
+      xPercent: 50,
+      yPercent: 50,
+    };
+    state = projectReducer(state, { type: 'ADD_CLIP', clip: txt });
+
+    // Selecting a slide animation defaults fadeWithSlide to true
+    state = projectReducer(state, {
+      type: 'UPDATE_CLIP_PROPS',
+      clipId: txt.id,
+      patch: { animInType: 'slide-left' },
+    });
+    const getText = () =>
+      state.history.present.tracks.find((t) => t.kind === 'text')?.clips[0] as TextClip;
+    expect(getText().animInType).toBe('slide-left');
+    expect(getText().fadeWithSlide).toBe(true);
+
+    // Unchecking "Fade with slide" sets false, and Undo/Redo toggles it cleanly
+    state = projectReducer(state, {
+      type: 'UPDATE_CLIP_PROPS',
+      clipId: txt.id,
+      patch: { fadeWithSlide: false },
+    });
+    expect(getText().fadeWithSlide).toBe(false);
+
+    state = projectReducer(state, { type: 'UNDO' });
+    expect(getText().fadeWithSlide).toBe(true);
+
+    state = projectReducer(state, { type: 'REDO' });
+    expect(getText().fadeWithSlide).toBe(false);
   });
 });
 

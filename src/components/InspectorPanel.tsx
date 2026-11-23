@@ -21,6 +21,7 @@ import {
   ALLOWED_VIDEO_TRANSITIONS,
   createDefaultColorFilter,
   DEFAULT_TRANSITION_DURATION_SECONDS,
+  isSlideTextAnimation,
   MAX_ADDED_AUDIO_FADE_SECONDS,
   MAX_FADE_SECONDS,
   MAX_IMAGE_SIZE_PERCENT,
@@ -70,6 +71,7 @@ interface InspectorPanelProps {
     animInDuration: number;
     animOutType: TextAnimationType;
     animOutDuration: number;
+    fadeWithSlide: boolean;
   }) => void;
   disabled: boolean;
 }
@@ -378,6 +380,9 @@ export function InspectorPanel({
               {/* Text Animations (In / Out) */}
               {(() => {
                 const animCfg = resolveTextClipAnimationConfig(selectedClip);
+                const hasSlideAnimation =
+                  isSlideTextAnimation(animCfg.animInType) ||
+                  isSlideTextAnimation(animCfg.animOutType);
                 return (
                   <div className="flex flex-col gap-3">
                     <span className="text-[11px] font-medium text-slate-300">Animations</span>
@@ -400,12 +405,17 @@ export function InspectorPanel({
                         id="inspector-anim-in"
                         disabled={disabled}
                         value={animCfg.animInType}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const nextIn = e.target.value as TextAnimationType;
                           onUpdateClip(selectedClip.id, {
-                            animInType: e.target.value as TextAnimationType,
+                            animInType: nextIn,
                             animInDuration: animCfg.animInDuration,
-                          })
-                        }
+                            ...(isSlideTextAnimation(nextIn) &&
+                            selectedClip.fadeWithSlide === undefined
+                              ? { fadeWithSlide: true }
+                              : {}),
+                          });
+                        }}
                         className="h-8 w-full rounded-lg border border-[#232A38] bg-[#0B0D11] px-2 text-xs text-slate-100 focus:border-blue-500 focus:outline-none"
                       >
                         {ALLOWED_TEXT_ANIMATIONS.map((anim) => (
@@ -451,12 +461,17 @@ export function InspectorPanel({
                         id="inspector-anim-out"
                         disabled={disabled}
                         value={animCfg.animOutType}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          const nextOut = e.target.value as TextAnimationType;
                           onUpdateClip(selectedClip.id, {
-                            animOutType: e.target.value as TextAnimationType,
+                            animOutType: nextOut,
                             animOutDuration: animCfg.animOutDuration,
-                          })
-                        }
+                            ...(isSlideTextAnimation(nextOut) &&
+                            selectedClip.fadeWithSlide === undefined
+                              ? { fadeWithSlide: true }
+                              : {}),
+                          });
+                        }}
                         className="h-8 w-full rounded-lg border border-[#232A38] bg-[#0B0D11] px-2 text-xs text-slate-100 focus:border-blue-500 focus:outline-none"
                       >
                         {ALLOWED_TEXT_ANIMATIONS.map((anim) => (
@@ -483,6 +498,21 @@ export function InspectorPanel({
                         />
                       )}
                     </div>
+
+                    {hasSlideAnimation && (
+                      <label className="flex cursor-pointer items-center justify-between text-[11px] text-slate-300">
+                        <span>Fade with slide</span>
+                        <input
+                          type="checkbox"
+                          disabled={disabled}
+                          checked={animCfg.fadeWithSlide}
+                          onChange={(e) =>
+                            onUpdateClip(selectedClip.id, { fadeWithSlide: e.target.checked })
+                          }
+                          className="h-4 w-4 rounded border-[#2C3547] accent-blue-600"
+                        />
+                      </label>
+                    )}
 
                     {hasCaptions && (
                       <button
