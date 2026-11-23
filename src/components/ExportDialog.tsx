@@ -6,6 +6,7 @@ import {
   ALLOWED_EXPORT_QUALITIES,
   formatBytes,
   getHeavyExportWarningInfo,
+  shouldInvalidateExportResult,
   SLOW_REENCODE_WARNING_SECONDS,
   type CanvasFitMode,
   type ExportCanvasPreset,
@@ -30,12 +31,14 @@ interface ExportDialogProps {
   exportError: string | null;
   exportResult: RenderResult | null;
   exportResultUrl: string | null;
+  exportedFingerprint: string | null;
+  isResultStale: boolean;
   onClose: () => void;
   onModeChange: (mode: ExportMode) => void;
   onSettingsChange: (next: ExportSettings) => void;
   onExport: () => void;
   onCancelExport: () => void;
-  onClearResult: () => void;
+  onClearResult: (markStale?: boolean) => void;
 }
 
 const QUALITY_LABELS: Record<ExportQuality, string> = {
@@ -86,6 +89,8 @@ export function ExportDialog({
   exportError,
   exportResult,
   exportResultUrl,
+  exportedFingerprint,
+  isResultStale,
   onClose,
   onModeChange,
   onSettingsChange,
@@ -102,7 +107,23 @@ export function ExportDialog({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [isExporting, isOpen, onClose]);
 
+  const isStaleMatch = shouldInvalidateExportResult({
+    hasResult: Boolean(exportResult || exportResultUrl),
+    isExporting,
+    exportedFingerprint,
+    currentProject: project,
+  });
+
+  useEffect(() => {
+    if (isOpen && isStaleMatch) {
+      onClearResult(true);
+    }
+  }, [isOpen, isStaleMatch, onClearResult]);
+
   if (!isOpen) return null;
+
+  const showReadyResult = Boolean(exportResult && exportResultUrl && !isStaleMatch);
+  const showStaleHint = !showReadyResult && (isResultStale || isStaleMatch);
 
   const { exportMode, exportSettings } = project;
   const activeCanvasPreset: ExportCanvasPreset = exportSettings.canvasPreset ?? 'original';
@@ -314,14 +335,21 @@ export function ExportDialog({
           )}
 
           {!isExporting ? (
-            <button
-              type="button"
-              disabled={!canStart}
-              onClick={onExport}
-              className="h-10 w-full rounded-lg bg-blue-600 text-xs font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
-            >
-              {exportSettings.audioOnlyMp3 ? 'Export MP3' : 'Start Export'}
-            </button>
+            <div className="flex flex-col gap-1.5">
+              <button
+                type="button"
+                disabled={!canStart}
+                onClick={onExport}
+                className="h-10 w-full rounded-lg bg-blue-600 text-xs font-semibold text-white transition-colors hover:bg-blue-500 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500"
+              >
+                {exportSettings.audioOnlyMp3 ? 'Export MP3' : 'Start Export'}
+              </button>
+              {showStaleHint && (
+                <p className="text-center text-[11px] text-amber-300/90">
+                  Your project changed since the last export.
+                </p>
+              )}
+            </div>
           ) : (
             <div className="flex flex-col gap-2.5 rounded-lg border border-[#232A38] bg-[#0B0D11] p-3">
               <div className="flex items-center justify-between text-xs">
@@ -367,7 +395,7 @@ export function ExportDialog({
             </div>
           )}
 
-          {exportResult && exportResultUrl && (
+          {showReadyResult && exportResult && exportResultUrl && (
             <div className="flex flex-col gap-3 border-t border-[#232A38] pt-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-1.5 text-xs font-semibold text-emerald-400">
@@ -376,7 +404,7 @@ export function ExportDialog({
                 </div>
                 <button
                   type="button"
-                  onClick={onClearResult}
+                  onClick={() => onClearResult(false)}
                   aria-label="Clear export result"
                   className="text-slate-400 hover:text-slate-200"
                 >

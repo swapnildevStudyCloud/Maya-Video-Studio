@@ -24,6 +24,7 @@ import {
   captionsToSrt,
   captureVideoThumbnail,
   createEffectClip,
+  createExportOutputFingerprint,
   createInitialEditorState,
   createVideoClipFromMeta,
   DEFAULT_IMAGE_CLIP_DURATION,
@@ -45,6 +46,7 @@ import {
   removeStoredGeminiApiKey,
   renderProjectExport,
   setStoredGeminiApiKey,
+  shouldInvalidateExportResult,
   validateAudioFile,
   validateImageFile,
   validateProjectForExport,
@@ -133,6 +135,10 @@ export default function App() {
   const [exportError, setExportError] = useState<string | null>(null);
   const [exportResult, setExportResult] = useState<RenderResult | null>(null);
   const [exportResultUrl, setExportResultUrl] = useState<string | null>(null);
+  const [exportedFingerprint, setExportedFingerprint] = useState<string | null>(null);
+  const [isExportResultStale, setIsExportResultStale] = useState(false);
+  const exportResultUrlRef = useRef<string | null>(null);
+  exportResultUrlRef.current = exportResultUrl;
   const exportAbortRef = useRef<AbortController | null>(null);
 
   const isBusy = isExporting || isGeneratingCaptions;
@@ -143,16 +149,12 @@ export default function App() {
       for (const asset of assetsRef.current.values()) {
         URL.revokeObjectURL(asset.objectUrl);
       }
-    };
-  }, []);
-
-  useEffect(() => {
-    return () => {
-      if (exportResultUrl) {
-        URL.revokeObjectURL(exportResultUrl);
+      if (exportResultUrlRef.current) {
+        URL.revokeObjectURL(exportResultUrlRef.current);
+        exportResultUrlRef.current = null;
       }
     };
-  }, [exportResultUrl]);
+  }, []);
 
   const assetList = useMemo(() => Array.from(assetsMap.values()), [assetsMap]);
 
@@ -226,10 +228,44 @@ export default function App() {
     return maxDur;
   }, [assetsMap]);
 
-  const clearExportResult = useCallback(() => {
+  const clearExportResult = useCallback((markStale = false) => {
+    if (exportResultUrlRef.current) {
+      URL.revokeObjectURL(exportResultUrlRef.current);
+      exportResultUrlRef.current = null;
+    }
     setExportResult(null);
     setExportResultUrl(null);
+    setExportedFingerprint(null);
+    setIsExportResultStale(markStale);
   }, []);
+
+  // Immediately invalidate stale export results whenever anything affecting output changes
+  useEffect(() => {
+    if (
+      shouldInvalidateExportResult({
+        hasResult: Boolean(exportResult || exportResultUrl),
+        isExporting,
+        exportedFingerprint,
+        currentProject: project,
+      })
+    ) {
+      clearExportResult(true);
+    }
+  }, [clearExportResult, exportResult, exportResultUrl, exportedFingerprint, isExporting, project]);
+
+  const handleOpenExport = useCallback(() => {
+    if (
+      shouldInvalidateExportResult({
+        hasResult: Boolean(exportResult || exportResultUrl),
+        isExporting,
+        exportedFingerprint,
+        currentProject: projectRef.current,
+      })
+    ) {
+      clearExportResult(true);
+    }
+    setIsExportOpen(true);
+  }, [clearExportResult, exportResult, exportResultUrl, exportedFingerprint, isExporting]);
 
   const handleImportVideos = useCallback(
     async (files: File[]) => {
@@ -837,23 +873,47 @@ export default function App() {
   }, [captionSegments, project.name]);
 
   const handleExport = useCallback(async () => {
-    if (!projectValidation.ok || isBusy) return;
+    const latestProject = projectRef.current;
+    const latestAssets = assetsRef.current;
+    const latestValidation = validateProjectForExport(latestProject, latestAssets);
+    if (!latestValidation.ok || isBusy) return;
 
+    const latestVideoClips =
+      latestProject.tracks
+        .find((t) => t.kind === 'video')
+        ?.clips.filter((c): c is VideoClip => c.type === 'video') ?? [];
+    let latestFirstVideo: MediaAsset | null = null;
+    if (latestVideoClips[0]) {
+      const fromClip = latestAssets.get(latestVideoClips[0].assetId);
+      if (fromClip && fromClip.kind === 'video') {
+        latestFirstVideo = fromClip;
+      }
+    }
+    if (!latestFirstVideo) {
+      for (const asset of latestAssets.values()) {
+        if (asset.kind === 'video') {
+          latestFirstVideo = asset;
+          break;
+        }
+      }
+    }
+
+    const runFingerprint = createExportOutputFingerprint(latestProject);
     const controller = new AbortController();
     exportAbortRef.current = controller;
     setIsExporting(true);
     setIsPlaying(false);
     setExportError(null);
-    clearExportResult();
+    clearExportResult(false);
     setRenderProgress({ phase: 'loading', progress: 0, statusText: 'Loading ffmpeg core...' });
 
     try {
       const result = await renderProjectExport({
-        videoFile: firstVideoAsset?.file ?? null,
-        project,
-        assets: assetsMap,
-        videoWidth: firstVideoAsset?.width,
-        videoHeight: firstVideoAsset?.height,
+        videoFile: latestFirstVideo?.file ?? null,
+        project: latestProject,
+        assets: latestAssets,
+        videoWidth: latestFirstVideo?.width,
+        videoHeight: latestFirstVideo?.height,
         signal: controller.signal,
         onProgress: (p) => {
           if (exportAbortRef.current !== controller || controller.signal.aborted) return;
@@ -862,8 +922,11 @@ export default function App() {
       });
       if (exportAbortRef.current !== controller || controller.signal.aborted) return;
       const resultUrl = URL.createObjectURL(result.blob);
+      exportResultUrlRef.current = resultUrl;
+      setExportedFingerprint(runFingerprint);
       setExportResult(result);
       setExportResultUrl(resultUrl);
+      setIsExportResultStale(false);
     } catch (err) {
       if (
         exportAbortRef.current === controller &&
@@ -878,7 +941,7 @@ export default function App() {
         setRenderProgress(null);
       }
     }
-  }, [assetsMap, clearExportResult, firstVideoAsset, isBusy, project, projectValidation.ok]);
+  }, [clearExportResult, isBusy]);
 
   const handleCancelExport = useCallback(() => {
     const controller = exportAbortRef.current;
@@ -1022,7 +1085,7 @@ export default function App() {
           onRedo={() => dispatch({ type: 'REDO' })}
           hasApiKey={Boolean(storedApiKey)}
           onOpenSettings={() => setIsSettingsOpen(true)}
-          onOpenExport={() => setIsExportOpen(true)}
+          onOpenExport={handleOpenExport}
           canExport={projectValidation.ok}
           isBusy={isBusy}
         />
@@ -1142,6 +1205,8 @@ export default function App() {
         exportError={exportError}
         exportResult={exportResult}
         exportResultUrl={exportResultUrl}
+        exportedFingerprint={exportedFingerprint}
+        isResultStale={isExportResultStale}
         onClose={() => setIsExportOpen(false)}
         onModeChange={(mode: ExportMode) => dispatch({ type: 'SET_EXPORT_MODE', mode })}
         onSettingsChange={(settings: ExportSettings) =>

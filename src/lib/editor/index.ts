@@ -255,6 +255,11 @@ export {
 } from './ffmpegArgs';
 
 export {
+  createExportOutputFingerprint,
+  shouldInvalidateExportResult,
+} from './exportSnapshot';
+
+export {
   createCoreLoadSessionState,
   FFMPEG_CDN_BASE_URL,
   FFMPEG_CORE_VERSION,
